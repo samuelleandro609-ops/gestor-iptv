@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "./safe-area";
 import { api, getSessionToken, setSessionToken, type ApiResponse } from "./api";
@@ -3644,6 +3644,10 @@ function PaymentsTab({ data }: { data: State }) {
   const [lastPayment, setLastPayment] = useState<Payment | null>(null);
   const [paymentMsg, setPaymentMsg] = useState<string | null>(null);
   const [copiedPaymentId, setCopiedPaymentId] = useState<number | null>(null);
+  // A usuária marcou "Ligar modo ao vivo" ao salvar, antes do teste:
+  // depois que o teste passar, o modo ao vivo é ligado sozinho com
+  // uma segunda gravação, sem ela precisar marcar e salvar de novo.
+  const wantedLiveModeRef = useRef(false);
 
   useEffect(() => {
     setEnvironment(data.mpEnvironment);
@@ -3651,6 +3655,41 @@ function PaymentsTab({ data }: { data: State }) {
   }, [data.mpEnvironment, data.liveMode]);
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["state"] });
+
+  const test = useMutation({
+    mutationFn: () => api.testMercadoPago({}),
+    onSuccess: (r) => {
+      setTestResult({ connected: r.connected, detail: r.detail });
+      setTestMsg(null);
+      const wantedLive = wantedLiveModeRef.current;
+      wantedLiveModeRef.current = false;
+      invalidate();
+      if (r.connected && wantedLive && environment === "producao") {
+        saveLive.mutate();
+      }
+    },
+    onError: (e) => {
+      wantedLiveModeRef.current = false;
+      setTestResult({ connected: false, detail: String(e) });
+    },
+  });
+
+  const saveLive = useMutation({
+    mutationFn: () =>
+      api.saveMercadoPago({
+        accessToken: "",
+        publicKey: "",
+        environment: "producao",
+        liveMode: true,
+        clearCredentials: false,
+      }),
+    onSuccess: () => {
+      setLiveMode(true);
+      setFormMsg("Modo ao vivo ligado: o teste passou e as credenciais salvas foram confirmadas pelo Mercado Pago.");
+      invalidate();
+    },
+    onError: (e) => setFormError(String(e)),
+  });
 
   const save = useMutation({
     mutationFn: () =>
@@ -3664,8 +3703,12 @@ function PaymentsTab({ data }: { data: State }) {
     onSuccess: () => {
       setAccessToken("");
       setPublicKey("");
-      setFormMsg("Credenciais salvas no gestor. O access token não será mostrado novamente.");
+      // Salvar não descarta mais as credenciais quando o modo ao vivo
+      // foi marcado antes do teste: elas ficam salvas, com o modo ao
+      // vivo desligado, e o teste roda sozinho logo abaixo.
+      setFormMsg("Credenciais salvas no gestor. O access token não será mostrado novamente. Testando a conexão agora…");
       invalidate();
+      test.mutate();
     },
     onError: (e) => setFormError(String(e)),
   });
@@ -3687,16 +3730,6 @@ function PaymentsTab({ data }: { data: State }) {
       invalidate();
     },
     onError: (e) => setFormError(String(e)),
-  });
-
-  const test = useMutation({
-    mutationFn: () => api.testMercadoPago({}),
-    onSuccess: (r) => {
-      setTestResult({ connected: r.connected, detail: r.detail });
-      setTestMsg(null);
-      invalidate();
-    },
-    onError: (e) => setTestResult({ connected: false, detail: String(e) }),
   });
 
   const sync = useMutation({
@@ -3742,6 +3775,7 @@ function PaymentsTab({ data }: { data: State }) {
     e.preventDefault();
     setFormMsg(null);
     setFormError(null);
+    wantedLiveModeRef.current = liveMode && environment === "producao";
     save.mutate();
   }
 
@@ -3796,7 +3830,7 @@ function PaymentsTab({ data }: { data: State }) {
             autoComplete="off"
           />
           <p className="mt-1 text-sm text-[var(--dim)]">
-            Status: {data.mpPublicKeyMasked ? `salva (${data.mpPublicKeyMasked})` : "não salva"}
+            Status: {data.mpPublicKeyMasked ? `salva (${data.mpPublicKeyMasked})` : "não salva"} • A chave começa com APP_USR- em Produção ou TEST- em Teste. E-mail não é chave: copie a chave em Suas integrações → Meios de pagamento → Credenciais, no Mercado Pago.
           </p>
         </div>
         <div>
@@ -3811,7 +3845,7 @@ function PaymentsTab({ data }: { data: State }) {
             autoComplete="off"
           />
           <p className="mt-1 text-sm text-[var(--dim)]">
-            Status: {data.mpConfigured ? "salvo" : "não salvo"} • Conexão: {data.mpVerified ? `testada${data.mpAccountLabel ? ` (${data.mpAccountLabel})` : ""}` : "ainda não testada"}
+            Status: {data.mpConfigured ? "salvo" : "não salvo"} • Conexão: {data.mpVerified ? `testada${data.mpAccountLabel ? ` (${data.mpAccountLabel})` : ""}` : "ainda não testada"} • O token também começa com APP_USR- em Produção ou TEST- em Teste, e precisa ser do mesmo ambiente que a Public Key.
           </p>
         </div>
         <fieldset>
@@ -3855,7 +3889,8 @@ function PaymentsTab({ data }: { data: State }) {
             <span className="block font-semibold">Ligar modo ao vivo</span>
             <span className="block text-sm text-[var(--dim)]">
               Só é liberado em Produção depois que o token salvo passa no teste de
-              conexão. Com ele ligado, a fatura gera Pix real e consulta a
+              conexão. Ao salvar com ele marcado, o teste roda sozinho e, se passar,
+              ele liga sozinho. Com ele ligado, a fatura gera Pix real e consulta a
               confirmação no Mercado Pago.
             </span>
           </span>
@@ -3880,7 +3915,7 @@ function PaymentsTab({ data }: { data: State }) {
           <button
             type="button"
             className="w-full rounded-lg bg-[var(--accent)] px-4 py-3.5 font-display text-lg font-bold text-[var(--accent-ink)] disabled:opacity-50"
-            disabled={test.isPending || !data.mpConfigured}
+            disabled={test.isPending}
             onClick={() => {
               setTestResult(null);
               test.mutate();
@@ -3890,7 +3925,7 @@ function PaymentsTab({ data }: { data: State }) {
             {test.isPending ? "Testando o Mercado Pago…" : "Testar Mercado Pago"}
           </button>
           {!data.mpConfigured && (
-            <p className="mt-2 text-sm text-[var(--dim)]">Salve a Public Key e o Access Token primeiro — aí o botão de testar é liberado.</p>
+            <p className="mt-2 text-sm text-[var(--dim)]">Depois de salvar, o teste roda sozinho. Se tocar em Testar Mercado Pago antes de salvar, ele vai dizer que ainda não há token salvo.</p>
           )}
           {testResult && (
             <div
