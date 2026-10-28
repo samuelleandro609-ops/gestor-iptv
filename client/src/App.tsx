@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { SafeAreaTopScrim } from "./safe-area";
+import invoiceBg from "./assets/invoice-bg.jpg";
 import { api, getSessionToken, setSessionToken, type ApiResponse } from "./api";
 
 type State = ApiResponse<typeof api, "getState">;
@@ -484,9 +485,24 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
   const left = daysLeft(invoice.expiresAt);
 
   return (
-    <div className="min-h-screen" style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)` }}>
+    <div className="relative min-h-screen overflow-hidden">
+      {/* Fundo da fatura: imagem de filmes em tela cheia, com leve
+          desfoque para o texto continuar legível e os cartazes ainda
+          visíveis por baixo da cor do tema. */}
+      <div className="absolute inset-0" aria-hidden="true">
+        <img
+          src={invoiceBg}
+          alt=""
+          className="h-full w-full object-cover"
+          style={{ filter: "blur(5px) brightness(0.62)", transform: "scale(1.07)" }}
+        />
+        <div
+          className="absolute inset-0"
+          style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)`, opacity: 0.68 }}
+        />
+      </div>
       <SafeAreaTopScrim backgroundColor={theme.dark} />
-      <main className="mx-auto w-full max-w-md px-4 pb-10 pt-8">
+      <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8">
         <p className="text-center text-sm font-semibold uppercase tracking-widest text-white/80">
           {invoice.serverName ?? "Assinatura IPTV"}
         </p>
@@ -510,10 +526,9 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
               <dd className="font-semibold">{invoice.planName ?? "—"}</dd>
             </div>
             <div className="flex justify-between gap-4">
-              <dt className="text-neutral-500">Duração</dt>
+              <dt className="text-neutral-500">Dias restantes</dt>
               <dd className="font-semibold">
-                {invoice.planDays != null ? `${invoice.planDays} dias` : "—"}
-                {invoice.planCredits != null ? ` (${invoice.planCredits} crédito${invoice.planCredits > 1 ? "s" : ""})` : ""}
+                {left < 0 ? `vencido há ${-left} dias` : left === 0 ? "0 dias — vence hoje" : `${left} dias`}
               </dd>
             </div>
             <div className="flex justify-between gap-4">
@@ -722,22 +737,6 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
               <pre className="mt-1 whitespace-pre-wrap font-sans">{confirmMsg}</pre>
             </div>
           )}
-        </section>
-
-        <section aria-label="Status da renovação automática" className="mt-6 rounded-2xl bg-black/35 p-4 text-white">
-          <p className="text-sm font-bold">Status desta renovação</p>
-          <ul className="mt-2 space-y-1 text-sm text-white/85">
-            <li>Mercado Pago: {invoice.mpVerified ? "credencial testada" : invoice.mpConfigured ? "credencial salva, teste pendente" : "não configurado"}</li>
-            <li>Modo ao vivo: {invoice.liveMode ? "ligado" : "desligado"}</li>
-            <li>Painel IPTV: {invoice.panelConnected ? "conectado" : "não conectado — a renovação automática ainda fica pendente após o pagamento"}</li>
-            <li>WhatsApp automático: {invoice.whatsappConnected ? "conectado" : "não conectado"}</li>
-          </ul>
-          <a href="#/" className="mt-3 block text-center text-sm font-semibold text-white underline">
-            Área do gestor (pede login do responsável)
-          </a>
-          <p className="mt-1 text-center text-xs text-white/70">
-            Você não precisa de login nenhum para pagar esta fatura — o login é só da área do responsável pelo gestor.
-          </p>
         </section>
       </main>
     </div>
