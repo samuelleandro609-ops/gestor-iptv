@@ -643,12 +643,16 @@ async function panelExtendUser(
   }
 }
 
-// Testa a autenticação da API do painel com o token salvo. HTTP 400 é
-// tratado como erro de formato/campo, não como "token errado": o teste
-// tenta, UMA DE CADA VEZ, as variações comuns de envio do token para
-// POST /auth/static-token e registra HTTP + corpo exato da resposta
-// (com token/senha escondidos) de cada tentativa. Só HTTP 2xx sem erro
-// declarado no corpo marca conectado. Nenhum crédito é consumido.
+// Testa a autenticação da API do painel. A mensagem exata da API
+// (HTTP 400 com "username should not be empty" / "password should not
+// be empty") mostra que ela pede usuário e senha do painel nos campos
+// username e password — não um token solto. Por isso o teste tenta
+// PRIMEIRO as variações com {username, password} do painel salvo
+// neste servidor e só depois as variações com o token salvo; se a
+// API emitir um token na resposta, ele é guardado neste servidor
+// para as chamadas de extensão (nunca exibido). HTTP 400 é erro de
+// formato/campo, não "token errado". Só HTTP 2xx sem erro declarado
+// no corpo marca conectado. Nenhum crédito é consumido.
 type PanelAuthAttempt = {
   id: string;
   label: string;
@@ -677,14 +681,37 @@ type PanelTestResult = {
   connected: boolean;
   detail: string;
   diagnostic: PanelDiagnostic;
+  issuedToken?: string;
 };
+
+// Token emitido pela API na resposta de autenticação (campos comuns:
+// token, accessToken, access_token, staticToken, static_token, ou
+// dentro de data). Nunca é exibido: só é guardado no servidor.
+function extractPanelIssuedToken(rawBody: string): string {
+  try {
+    const data = JSON.parse(rawBody) as unknown;
+    const candidates: unknown[] = [];
+    const walk = (value: unknown, depth: number): void => {
+      if (depth > 3 || !value || typeof value !== "object") return;
+      for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+        if (/^(token|accesstoken|access_token|statictoken|static_token)$/i.test(key)) candidates.push(val);
+        walk(val, depth + 1);
+      }
+    };
+    walk(data, 0);
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim().length >= 10) return candidate.trim();
+    }
+  } catch {}
+  return "";
+}
 
 function panelCorrectionSteps(classification: string): string[] {
   const common = [
     "Confira a base: ela deve ser somente o endereço da API, por exemplo https://mcapi.knewcms.com:2087, sem /auth/static-token no final e sem barra sobrando.",
-    "Gere um token estático novo no painel e cole somente ele no campo “Token da API do painel”. Não cole usuário/senha do painel, token do Mercado Pago, nem aspas ou espaços junto.",
-    "Confira se o token é o token estático da API deste painel e desta conta. Token de outro servidor, token vencido ou código de cliente não autentica.",
-    "Salve o servidor depois de trocar a base ou o token e toque em “Testar conexão” de novo. O gestor só marca conectado quando uma variação responder sucesso.",
+    "A API deste painel pede usuário e senha do painel nos campos username e password. O gestor envia os que já estão salvos neste servidor — confira em Servidores → Editar se são o usuário e a senha do painel (não os de um cliente IPTV). Se a API emitir um token, o gestor guarda ele sozinho quando o teste passar.",
+    "Se o painel emitir um token estático separado, cole somente ele no campo “Token da API do painel” (Opções avançadas). Não cole usuário/senha do painel, token do Mercado Pago, nem aspas ou espaços junto.",
+    "Salve o servidor depois de trocar a base, o usuário, a senha ou o token e toque em “Testar conexão” de novo. O gestor só marca conectado quando uma variação responder sucesso.",
   ];
   if (classification === "http_400_formato_ou_campo") {
     return [
@@ -695,7 +722,7 @@ function panelCorrectionSteps(classification: string): string[] {
   }
   if (classification === "token_recusado") {
     return [
-      "A API respondeu, mas recusou a credencial. Gere um token estático novo no painel e substitua o salvo neste servidor.",
+      "A API respondeu, mas recusou a credencial. Confira o usuário e a senha do painel salvos neste servidor (Servidores → Editar) — a API pede os campos username e password.",
       ...common.slice(0, 3),
     ];
   }
@@ -714,7 +741,12 @@ function panelCorrectionSteps(classification: string): string[] {
   return common;
 }
 
-async function panelTestConnection(apiBase: string, token: string): Promise<PanelTestResult> {
+async function panelTestConnection(
+  apiBase: string,
+  token: string,
+  username = "",
+  password = "",
+): Promise<PanelTestResult> {
   const base = inspectPanelApiBase(apiBase);
   const testedAt = new Date().toISOString();
   const endpoint = base.valid ? `${base.normalized}/auth/static-token` : "";
@@ -744,16 +776,18 @@ async function panelTestConnection(apiBase: string, token: string): Promise<Pane
     const diagnostic = makeDiagnostic("base_invalida", `Não conectou: ${base.error}`, []);
     return { connected: false, detail: diagnostic.headline, diagnostic };
   }
-  if (!token) {
+  const hasCredentials = username.trim().length > 0 && password.length > 0;
+  if (!token && !hasCredentials) {
     const diagnostic = makeDiagnostic(
-      "sem_token",
-      "Não conectou: nenhum token da API está salvo para este servidor.",
+      "sem_credencial",
+      "Não conectou: a API do painel pede usuário e senha do painel (campos username e password) e nenhum token está salvo para este servidor. Confira o usuário e a senha do painel salvos neste servidor e toque em “Testar conexão” de novo.",
       [],
     );
     return { connected: false, detail: diagnostic.headline, diagnostic };
   }
 
   const json = { "Content-Type": "application/json", Accept: "application/json" };
+  const credentialBody = JSON.stringify({ username: username.trim(), password });
   const variants: Array<{
     id: string;
     label: string;
@@ -761,6 +795,49 @@ async function panelTestConnection(apiBase: string, token: string): Promise<Pane
     headers: Record<string, string>;
     body?: string;
   }> = [
+    // A API pede username + password: estas variações vão primeiro.
+    ...(hasCredentials
+      ? [
+          {
+            id: "json_username_password",
+            label: "Corpo {username, password}",
+            description: "Corpo JSON com os campos username e password do painel salvo neste servidor, sem cabeçalho de token.",
+            headers: { ...json },
+            body: credentialBody,
+          },
+          {
+            id: "form_username_password",
+            label: "Formulário {username, password}",
+            description: "Corpo de formulário (application/x-www-form-urlencoded) com username e password do painel.",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: new URLSearchParams({ username: username.trim(), password }).toString(),
+          },
+          ...(token
+            ? [
+                {
+                  id: "json_username_password_token",
+                  label: "Corpo {username, password, token}",
+                  description: "Corpo JSON com username, password e o token salvo.",
+                  headers: { ...json },
+                  body: JSON.stringify({ username: username.trim(), password, token }),
+                },
+                {
+                  id: "json_username_password_bearer",
+                  label: "Corpo {username, password} + Bearer",
+                  description: "Corpo JSON com username e password, mais o cabeçalho Authorization: Bearer com o token salvo.",
+                  headers: { ...json, Authorization: `Bearer ${token}` },
+                  body: credentialBody,
+                },
+              ]
+            : []),
+        ]
+      : []),
+    // Variações só com o token salvo (só existem se houver token).
+    ...(token
+      ? [
     {
       id: "bearer_e_json_token",
       label: "Bearer + corpo {token}",
@@ -826,6 +903,8 @@ async function panelTestConnection(apiBase: string, token: string): Promise<Pane
       headers: { ...json, Authorization: `Bearer ${token}` },
       body: JSON.stringify({ access_token: token }),
     },
+      ]
+      : []),
   ];
 
   const attempts: PanelAuthAttempt[] = [];
@@ -846,15 +925,18 @@ async function panelTestConnection(apiBase: string, token: string): Promise<Pane
         label: variant.label,
         description: variant.description,
         httpStatus: res.status,
-        responseBody: sanitizePanelResponseBody(rawBody, [token], 500),
+        responseBody: sanitizePanelResponseBody(rawBody, [token, password], 500),
         error: failureMessage ?? "",
         success,
       };
       attempts.push(attempt);
       if (success) {
-        const headline = `Conectou: a variação “${variant.label}” foi aceita pela API do painel (HTTP ${res.status}). O painel passa a ser tratado como conectado neste gestor.`;
+        const issuedToken = extractPanelIssuedToken(rawBody);
+        const headline = issuedToken
+          ? `Conectou: a variação “${variant.label}” foi aceita pela API do painel (HTTP ${res.status}). A API emitiu um token, que o gestor guardou neste servidor (sem exibir) para as chamadas de extensão. O painel passa a ser tratado como conectado neste gestor.`
+          : `Conectou: a variação “${variant.label}” foi aceita pela API do painel (HTTP ${res.status}). O painel passa a ser tratado como conectado neste gestor.`;
         const diagnostic = makeDiagnostic("conectado", headline, attempts, variant.label);
-        return { connected: true, detail: headline, diagnostic };
+        return { connected: true, detail: headline, diagnostic, issuedToken: issuedToken || undefined };
       }
       if (res.status === 429) break;
     } catch (e) {
@@ -868,7 +950,7 @@ async function panelTestConnection(apiBase: string, token: string): Promise<Pane
         responseBody: "",
         error: timedOut
           ? "A API não respondeu dentro de 10 segundos."
-          : `Não houve resposta da API: ${sanitizePanelResponseBody(rawMessage, [token], 240)}`,
+          : `Não houve resposta da API: ${sanitizePanelResponseBody(rawMessage, [token, password], 240)}`,
         success: false,
       };
       attempts.push(attempt);
@@ -2447,8 +2529,8 @@ export const Actions = {
     },
   }),
 
-  // Testa a conexão com a API do painel usando o token SALVO deste
-  // servidor. A resposta traz o diagnóstico completo (variações, HTTP,
+  // Testa a conexão com a API do painel usando o usuário e a senha do
+  // painel salvos neste servidor (e o token, se houver). A resposta traz o diagnóstico completo (variações, HTTP,
   // corpo da API sem o token e passos de correção) — o token nunca é
   // devolvido. Enquanto o teste não passar, a renovação segue pendente.
   testPanelApi: defineAction({
@@ -2463,30 +2545,28 @@ export const Actions = {
       const server = rows[0];
       const ownerId = await requireAccount(ctx, args.session);
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
-      if (!server.apiToken) {
-        const result = await panelTestConnection(server.apiBase, "");
-        await db
-          .update(schema.servers)
-          .set({
-            apiVerified: 0,
-            apiStatusDetail: result.detail,
-            apiDiagnostic: JSON.stringify(result.diagnostic),
-          })
-          .where(eq(schema.servers.id, server.id));
-        ctx.invalidateQueries();
-        return result;
-      }
-      const result = await panelTestConnection(server.apiBase, server.apiToken);
+      // A API pede usuário e senha do painel: o teste envia os salvos
+      // neste servidor (e o token, se houver). Se a API emitir um
+      // token, ele fica guardado neste servidor para as extensões.
+      const result = await panelTestConnection(
+        server.apiBase,
+        server.apiToken,
+        server.panelUser,
+        server.panelPass,
+      );
       await db
         .update(schema.servers)
         .set({
           apiVerified: result.connected ? 1 : 0,
+          ...(result.issuedToken ? { apiToken: result.issuedToken } : {}),
           apiStatusDetail: result.detail,
           apiDiagnostic: JSON.stringify(result.diagnostic),
         })
         .where(eq(schema.servers.id, server.id));
       ctx.invalidateQueries();
-      return result;
+      // O token emitido (se houve) já foi guardado acima; ele nunca
+      // volta na resposta.
+      return { connected: result.connected, detail: result.detail, diagnostic: result.diagnostic };
     },
   }),
 
@@ -2515,11 +2595,11 @@ export const Actions = {
       const server = serverRows[0];
       const ownerId = await requireAccount(ctx, args.session);
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
-      if (!server.apiToken || server.apiVerified !== 1) {
+      if (server.apiVerified !== 1) {
         return {
           extended: false,
           detail:
-            "Antes do teste de extensão, salve o token da API e toque em “Testar conexão” até a autenticação passar. Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
+            "Antes do teste de extensão, toque em “Testar conexão” até a autenticação da API passar (ela usa o usuário e a senha do painel salvos neste servidor e guarda o token emitido, se houver). Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
           newExpiresAt: null,
         };
       }
