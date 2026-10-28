@@ -191,9 +191,9 @@ CREATE TABLE IF NOT EXISTS settings (
   mp_payer_email text NOT NULL DEFAULT '',
   mp_environment text NOT NULL DEFAULT 'teste',
   live_mode integer NOT NULL DEFAULT 0,
-  renewed_message text NOT NULL DEFAULT 'Pagamento confirmado! ✅ Olá, {nome}! Sua assinatura foi renovada por {dias} dias. Novo vencimento: {novo_vencimento}. Usuário IPTV: {usuario}. Obrigado!',
-  expired_message text NOT NULL DEFAULT 'Olá, {nome}. Sua assinatura expirou em {vencimento}. Para voltar a assistir, renove pelo seu link de renovação e pague com Pix. Qualquer dúvida, é só chamar aqui.',
-  charge_message text NOT NULL DEFAULT 'Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.',
+  renewed_message text NOT NULL DEFAULT E'Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.',
+  expired_message text NOT NULL DEFAULT E'Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!',
+  charge_message text NOT NULL DEFAULT E'Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!',
   whatsapp_status text NOT NULL DEFAULT 'desconectado',
   whatsapp_phone text NOT NULL DEFAULT '',
   wa_qr_status text NOT NULL DEFAULT 'desconectado',
@@ -209,5 +209,10 @@ CREATE TABLE IF NOT EXISTS settings (
   invoice_title text NOT NULL DEFAULT 'Renove sua assinatura',
   invoice_message text NOT NULL DEFAULT 'Pague com Pix e sua conta é renovada assim que o pagamento for confirmado.',
   invoice_color text NOT NULL DEFAULT 'verde',
-  warn_message text NOT NULL DEFAULT 'Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: toque no seu link de renovação e pague com Pix.'
+  warn_message text NOT NULL DEFAULT E'Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!',
+  warn_soon_message text NOT NULL DEFAULT E'Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!'
 );
+
+-- Coluna nova para bases já criadas: adiciona sem apagar nada.
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS warn_soon_message text NOT NULL DEFAULT E'Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!';
+
