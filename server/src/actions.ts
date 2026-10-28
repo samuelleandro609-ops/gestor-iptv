@@ -447,6 +447,20 @@ type PanelApiBaseInspection = {
 // Confere a base da API antes de montar a URL do teste. HTTP 400 também
 // pode nascer de uma URL mal montada: barra final, endpoint colado na
 // base (caminho duplicado), porta errada/ausente ou caminho a mais.
+// Base da API do painel WPlay/WManage, EMBUTIDA no gestor: é o mesmo
+// endereço para todo painel deste tipo, então ninguém precisa digitá-la
+// nem saber que ela existe — o formulário pede só link, usuário e senha
+// do painel. O TOKEN NÃO é embutido e nunca é um valor fixo: ele é
+// emitido pela API a cada login com o usuário/senha do painel deste
+// servidor e guardado nele, sem exibir. Um token embutido e igual para
+// todo mundo daria a todas as contas o acesso de uma só — por isso o
+// teste sempre entra com as credenciais do próprio servidor.
+const DEFAULT_PANEL_API_BASE = "https://mcapi.knewcms.com:2087";
+function resolvePanelApiBase(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed || DEFAULT_PANEL_API_BASE;
+}
+
 function inspectPanelApiBase(raw: string): PanelApiBaseInspection {
   const warnings: string[] = [];
   const original = raw.trim();
@@ -597,13 +611,13 @@ async function panelExtendUser(
   server: typeof schema.servers.$inferSelect,
   args: { iptvUser: string; iptvPass: string; days: number },
 ): Promise<{ ok: boolean; detail: string }> {
-  const baseCheck = inspectPanelApiBase(server.apiBase);
+  const baseCheck = inspectPanelApiBase(resolvePanelApiBase(server.apiBase));
   if (!baseCheck.valid) return { ok: false, detail: `A base da API do painel está inválida: ${baseCheck.error}` };
   const base = baseCheck.normalized;
   if (!server.apiToken)
     return {
       ok: false,
-      detail: `Extensão pendente do usuário ${args.iptvUser}: o servidor está conectado com link, usuário e senha do painel, mas a chamada de extensão da API deste painel pede o token da API e nenhum token está salvo neste servidor. Nada foi renovado no painel e nenhum crédito foi consumido. O token pode ser salvo em Servidores → Editar → Opções avançadas.`,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: o servidor está conectado com link, usuário e senha do painel, mas a chamada de extensão da API deste painel pede o token emitido no login — e nenhum token foi guardado ainda neste servidor. Toque em “Testar conexão” neste servidor para o gestor entrar com o usuário e a senha do painel e guardar o token emitido. Nada foi renovado no painel e nenhum crédito foi consumido.`,
     };
   const credits = creditsForDays(args.days);
   const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits };
@@ -708,10 +722,9 @@ function extractPanelIssuedToken(rawBody: string): string {
 
 function panelCorrectionSteps(classification: string): string[] {
   const common = [
-    "Confira a base: ela deve ser somente o endereço da API, por exemplo https://mcapi.knewcms.com:2087, sem /auth/static-token no final e sem barra sobrando.",
-    "A API deste painel pede usuário e senha do painel nos campos username e password. O gestor envia os que já estão salvos neste servidor — confira em Servidores → Editar se são o usuário e a senha do painel (não os de um cliente IPTV). Se a API emitir um token, o gestor guarda ele sozinho quando o teste passar.",
-    "Se o painel emitir um token estático separado, cole somente ele no campo “Token da API do painel” (Opções avançadas). Não cole usuário/senha do painel, token do Mercado Pago, nem aspas ou espaços junto.",
-    "Salve o servidor depois de trocar a base, o usuário, a senha ou o token e toque em “Testar conexão” de novo. O gestor só marca conectado quando uma variação responder sucesso.",
+    "A conexão com a API já vem embutida no gestor: ele entra com o usuário e a senha do painel salvos neste servidor. Confira em Servidores → Editar se são o usuário e a senha do painel (não os de um cliente IPTV) e toque em “Testar conexão” de novo.",
+    "Se a API emitir um token, o gestor guarda ele sozinho quando o teste passar — não há campo de token para preencher.",
+    "O gestor só marca conectado quando uma variação responder sucesso.",
   ];
   if (classification === "http_400_formato_ou_campo") {
     return [
@@ -780,7 +793,7 @@ async function panelTestConnection(
   if (!token && !hasCredentials) {
     const diagnostic = makeDiagnostic(
       "sem_credencial",
-      "Não conectou: a API do painel pede usuário e senha do painel (campos username e password) e nenhum token está salvo para este servidor. Confira o usuário e a senha do painel salvos neste servidor e toque em “Testar conexão” de novo.",
+      "Não conectou: nenhum usuário e senha do painel estão salvos neste servidor para a API entrar, e nenhum token está salvo. Confira o usuário e a senha do painel em Servidores → Editar e toque em “Testar conexão” de novo.",
       [],
     );
     return { connected: false, detail: diagnostic.headline, diagnostic };
@@ -2546,10 +2559,11 @@ export const Actions = {
       const ownerId = await requireAccount(ctx, args.session);
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
       // A API pede usuário e senha do painel: o teste envia os salvos
-      // neste servidor (e o token, se houver). Se a API emitir um
+      // neste servidor (e o token, se houver). A base da API já vem
+      // embutida no gestor (resolvePanelApiBase). Se a API emitir um
       // token, ele fica guardado neste servidor para as extensões.
       const result = await panelTestConnection(
-        server.apiBase,
+        resolvePanelApiBase(server.apiBase),
         server.apiToken,
         server.panelUser,
         server.panelPass,
@@ -2605,6 +2619,17 @@ export const Actions = {
       }
       const { client, plan } = await loadClientAndPlan(ctx, args.clientId);
       if (client.ownerId !== ownerId) throw new Error("Cliente não encontrado nesta conta.");
+      // Cliente arquivado ou na lixeira não pode ser estendido: ele não
+      // aparece mais na lista de clientes nem na lista do teste, e uma
+      // chamada antiga não pode renovar (e consumir crédito) por ele.
+      if (client.listState !== "normal") {
+        return {
+          extended: false,
+          detail:
+            "Este cliente está arquivado ou na lixeira, por isso não pode ser estendido. Restaure o cliente na aba Clientes para estender de novo. Nenhum crédito foi consumido.",
+          newExpiresAt: null,
+        };
+      }
       const result = await panelExtendUser(server, {
         iptvUser: client.iptvUser,
         iptvPass: client.iptvPass,
