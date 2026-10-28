@@ -439,7 +439,7 @@ function AuthScreen({
           )}
           <p className="text-center text-xs text-[var(--dim)]">
             {mode === "criar"
-              ? "Ao criar a conta, você entra direto e já pode cadastrar seus servidores, planos e clientes — tudo separado das outras contas. Você ganha 5 dias de teste grátis."
+              ? "Ao criar a conta, você entra direto e já pode cadastrar seus servidores, planos e clientes — tudo separado das outras contas. Você ganha 7 dias de teste grátis."
               : mode === "esqueci"
                 ? "O link vale por 1 hora. Se o envio de e-mail não estiver configurado, fale com quem administra o gestor."
                 : "Cada conta tem os seus próprios clientes, servidores, planos e WhatsApp."}
@@ -913,6 +913,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
 
 type Tab =
   | "dashboard"
+  | "renovacao"
   | "clientes"
   | "vendas"
   | "testes"
@@ -1041,6 +1042,14 @@ function MenuIcon({ tab }: { tab: Tab }) {
           <path d="M12 16.8h.01" />
         </svg>
       );
+    case "renovacao":
+      return (
+        <svg {...common}>
+          <path d="M20 12a8 8 0 1 1-2.3-5.6" />
+          <path d="M20 3.5V8h-4.5" />
+          <path d="M12 8v4.2l3 1.8" />
+        </svg>
+      );
     case "administracao":
       return (
         <svg {...common}>
@@ -1089,6 +1098,7 @@ function Manager({
 
   const menu: { id: Tab; label: string; badge?: number }[] = [
     { id: "dashboard", label: "Dashboard" },
+    ...(!data.isAdmin ? [{ id: "renovacao" as Tab, label: "Renovação" }] : []),
     { id: "clientes", label: "Clientes", badge: expiringSoon.length },
     { id: "vendas", label: "Vendas" },
     { id: "testes", label: "Testes" },
@@ -1197,6 +1207,7 @@ function Manager({
         {tab === "dashboard" && (
           <DashboardTab data={data} onNavigate={setTab} onShowClients={showClients} />
         )}
+        {tab === "renovacao" && !data.isAdmin && <RenewalTab data={data} />}
         {tab === "clientes" && (
           <ClientsTab
             data={data}
@@ -5368,6 +5379,33 @@ function DashboardTab({
         </button>
       </div>
 
+      {!data.isAdmin && (() => {
+        const endIso = data.access.subExpiresAt ?? data.access.trialEndsAt;
+        const urgent = data.access.daysLeft <= 3;
+        return endIso ? (
+          <div
+            role="status"
+            className={`flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3 ${urgent ? "border-[var(--danger)] bg-[var(--danger-bg)]" : "border-[var(--border)] bg-[var(--surface)]"}`}
+          >
+            <p className="text-sm">
+              <strong>
+                {data.access.subExpiresAt ? "Assinatura até" : "Teste grátis até"} {fmtDate(endIso)}
+              </strong>
+              {" — "}
+              {renewalDaysText(data.access.daysLeft)}
+              {data.access.priceCents > 0 ? ` — ${brl(data.access.priceCents)} por 30 dias` : ""}
+            </p>
+            <button
+              type="button"
+              className={btnPrimary}
+              onClick={() => onNavigate("renovacao")}
+            >
+              Renovar agora
+            </button>
+          </div>
+        ) : null;
+      })()}
+
       <div className="relative">
         <label htmlFor="dash-search" className={labelCls}>Buscar cliente</label>
         <input
@@ -6850,16 +6888,26 @@ function HostingSection({ data }: { data: State }) {
 // Só aparece no lugar do gestor: nenhum dado foi apagado. Ao pagar o
 // Pix e confirmar, o acesso volta por 30 dias e tudo reaparece.
 
-function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }) {
+/* ---------------- Pix da assinatura (QR Code + código) ---------------- */
+// Caixa compartilhada entre a aba Renovação e a tela de bloqueio: o Pix
+// só é gerado ao apertar "Gerar Pix" (abrir a aba não cria cobrança).
+// O QR Code vem do servidor, gerado a partir do código Pix exato; se
+// ele não vier, o código copiável continua valendo.
+function SubscriptionPixBox({ data }: { data: State }) {
   const queryClient = useQueryClient();
-  const [subPix, setSubPix] = useState<{ id: number; pixCode: string | null; amountCents: number } | null>(null);
+  const [subPix, setSubPix] = useState<{
+    id: number;
+    pixCode: string | null;
+    qrDataUrl: string | null;
+    amountCents: number;
+  } | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const createPix = useMutation({
     mutationFn: () => api.createSubscriptionPix({}),
     onSuccess: (res) => {
-      setSubPix({ id: res.id, pixCode: res.pixCode, amountCents: res.amountCents });
+      setSubPix({ id: res.id, pixCode: res.pixCode, qrDataUrl: res.qrDataUrl, amountCents: res.amountCents });
       setMessage(res.detail);
     },
     onError: (e) => setMessage(friendlyAuthError(e)),
@@ -6875,6 +6923,118 @@ function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }
     onError: (e) => setMessage(friendlyAuthError(e)),
   });
 
+  if (data.access.priceCents <= 0) {
+    return (
+      <p className="text-sm leading-relaxed text-[var(--dim)]">
+        O valor da assinatura ainda não foi definido pela administradora. Fale com ela para
+        definir o valor e liberar o pagamento.
+      </p>
+    );
+  }
+  if (!subPix) {
+    return (
+      <div className="space-y-3">
+        <button
+          type="button"
+          className={btnPrimary + " w-full py-3"}
+          disabled={createPix.isPending}
+          onClick={() => { setMessage(null); createPix.mutate(); }}
+        >
+          {createPix.isPending ? "Gerando Pix…" : "Gerar Pix"}
+        </button>
+        {message && (
+          <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{message}</p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3 text-left">
+      <p className="text-sm">
+        Valor: <strong>{brl(subPix.amountCents)}</strong> — pague com o QR Code ou o código Pix
+        abaixo (vale por 30 dias de acesso).
+      </p>
+      {subPix.qrDataUrl && (
+        <div className="flex justify-center">
+          <img src={subPix.qrDataUrl} alt="QR Code do Pix da assinatura" className="h-56 w-56 rounded-xl bg-white p-2" />
+        </div>
+      )}
+      {subPix.pixCode ? (
+        <>
+          <p className="break-all rounded-lg bg-[var(--surface2)] p-3 font-mono text-xs">{subPix.pixCode}</p>
+          <button
+            type="button"
+            className={btnGhost + " w-full"}
+            onClick={async () => { setCopied(await copyText(subPix.pixCode!)); }}
+          >
+            {copied ? "Chave Pix copiada ✓" : "Copiar chave Pix"}
+          </button>
+        </>
+      ) : (
+        <p className="text-sm text-[var(--dim)]">A chave Pix não veio nesta cobrança. Gere de novo.</p>
+      )}
+      <button
+        type="button"
+        className={btnPrimary + " w-full py-3"}
+        disabled={checkPix.isPending}
+        onClick={() => { setMessage(null); checkPix.mutate(); }}
+      >
+        {checkPix.isPending ? "Verificando…" : "Já paguei — verificar agora"}
+      </button>
+      {message && (
+        <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{message}</p>
+      )}
+    </div>
+  );
+}
+
+function renewalDaysText(daysLeft: number): string {
+  if (daysLeft <= 0) return "Vence hoje";
+  if (daysLeft === 1) return "Falta 1 dia";
+  return `Faltam ${daysLeft} dias`;
+}
+
+function RenewalTab({ data }: { data: State }) {
+  const access = data.access;
+  const endIso = access.subExpiresAt ?? access.trialEndsAt;
+  const isTrial = !access.subExpiresAt;
+  const urgent = access.daysLeft <= 3;
+  return (
+    <section aria-label="Renovação" className="mt-5 space-y-5 lg:mt-8">
+      <div>
+        <h2 className="font-display text-2xl font-extrabold">Renovação</h2>
+        <p className="mt-0.5 text-sm text-[var(--dim)]">
+          Renove a assinatura do gestor por Pix. Pagar antes do vencimento não perde os dias que
+          faltam: os 30 dias somam ao vencimento atual.
+        </p>
+      </div>
+      <div
+        className={`rounded-2xl border p-4 ${urgent ? "border-[var(--danger)] bg-[var(--danger-bg)]" : "border-[var(--border)] bg-[var(--surface)]"}`}
+        role="status"
+      >
+        <p className="font-display text-lg font-extrabold">
+          {isTrial ? "Teste grátis até" : "Assinatura até"}{" "}
+          {endIso ? fmtDate(endIso) : "—"}
+        </p>
+        <p className="mt-0.5 text-sm font-semibold">{renewalDaysText(access.daysLeft)}</p>
+        {access.priceCents > 0 && (
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            {brl(access.priceCents)} por 30 dias
+          </p>
+        )}
+      </div>
+      <div className="max-w-xl rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <SubscriptionPixBox data={data} />
+        <p className="mt-3 text-sm text-[var(--dim)]">
+          O Pix vai para o Mercado Pago da administradora. Ao confirmar o pagamento, o acesso é
+          liberado por 30 dias automaticamente e nenhum dado é apagado.
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--text)]">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
@@ -6886,56 +7046,10 @@ function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }
           servidores, planos e cobranças continuam todos salvos e voltam assim que o pagamento
           for confirmado.
         </p>
-        {data.access.priceCents > 0 ? (
+        {data.access.priceCents > 0 && (
           <p className="font-display text-3xl font-extrabold">{brl(data.access.priceCents)} <span className="text-base font-medium text-[var(--dim)]">por 30 dias</span></p>
-        ) : (
-          <p className="text-sm text-[var(--dim)]">
-            O valor da assinatura ainda não foi definido pela administradora. Fale com ela para
-            definir o valor e liberar o pagamento.
-          </p>
         )}
-        {!subPix ? (
-          <button
-            type="button"
-            className={btnPrimary + " w-full py-3"}
-            disabled={createPix.isPending || data.access.priceCents <= 0}
-            onClick={() => { setMessage(null); createPix.mutate(); }}
-          >
-            {createPix.isPending ? "Gerando Pix…" : "Gerar Pix"}
-          </button>
-        ) : (
-          <div className="space-y-3 text-left">
-            <p className="text-sm">
-              Valor: <strong>{brl(subPix.amountCents)}</strong> — pague com o código Pix abaixo
-              (vale por 30 dias de acesso).
-            </p>
-            {subPix.pixCode ? (
-              <>
-                <p className="break-all rounded-lg bg-[var(--surface2)] p-3 font-mono text-xs">{subPix.pixCode}</p>
-                <button
-                  type="button"
-                  className={btnGhost + " w-full"}
-                  onClick={async () => { setCopied(await copyText(subPix.pixCode!)); }}
-                >
-                  {copied ? "Chave Pix copiada ✓" : "Copiar chave Pix"}
-                </button>
-              </>
-            ) : (
-              <p className="text-sm text-[var(--dim)]">A chave Pix não veio nesta cobrança. Gere de novo.</p>
-            )}
-            <button
-              type="button"
-              className={btnPrimary + " w-full py-3"}
-              disabled={checkPix.isPending}
-              onClick={() => { setMessage(null); checkPix.mutate(); }}
-            >
-              {checkPix.isPending ? "Verificando…" : "Já paguei — verificar agora"}
-            </button>
-          </div>
-        )}
-        {message && (
-          <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{message}</p>
-        )}
+        <SubscriptionPixBox data={data} />
         <p className="text-sm text-[var(--dim)]">Conta: {data.accountEmail}</p>
         <button type="button" className={btnGhost + " w-full"} onClick={onLogout}>
           Sair
