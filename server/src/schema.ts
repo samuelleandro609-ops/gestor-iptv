@@ -322,19 +322,19 @@ export const settings = pgTable("settings", {
   renewedMessage: text("renewed_message")
     .notNull()
     .default(
-      "Pagamento confirmado! ✅ Olá, {nome}! Sua assinatura foi renovada por {dias} dias. Novo vencimento: {novo_vencimento}. Usuário IPTV: {usuario}. Obrigado!",
+      "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.",
     ),
   expiredMessage: text("expired_message")
     .notNull()
     .default(
-      "Olá, {nome}. Sua assinatura expirou em {vencimento}. Para voltar a assistir, renove pelo seu link de renovação e pague com Pix. Qualquer dúvida, é só chamar aqui.",
+      "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   // Modelo "Cobrança" do envio direto de mensagem ao cliente (botão
   // Enviar mensagem na lista de clientes): editável na aba Mensagens.
   chargeMessage: text("charge_message")
     .notNull()
     .default(
-      "Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
+      "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   whatsappStatus: text("whatsapp_status")
     .notNull()
@@ -373,6 +373,13 @@ export const settings = pgTable("settings", {
   warnMessage: text("warn_message")
     .notNull()
     .default(
-      "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: toque no seu link de renovação e pague com Pix.",
+      "Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+    ),
+  // Aviso de 3 dias antes: modelo separado, no mesmo estilo, porque
+  // a frase muda ("vence em 3 dias", e não "vence hoje").
+  warnSoonMessage: text("warn_soon_message")
+    .notNull()
+    .default(
+      "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
 });
