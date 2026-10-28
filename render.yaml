@@ -1,0 +1,28 @@
+# Gestor IPTV — deploy no Render (Blueprint, caminho ÚNICO).
+# No Render: New → Blueprint → conecte o repositório GitHub do projeto.
+# NÃO crie o Postgres manualmente antes: o Blueprint abaixo já cria o
+# banco gestor-iptv-db e liga a DATABASE_URL ao serviço. Criar um
+# segundo banco à mão deixaria dois bancos e o gestor usaria só um.
+# NENHUM segredo fica neste arquivo: DATABASE_URL vem do banco criado
+# aqui e SESSION_SECRET é gerado pelo próprio Render.
+services:
+  - type: web
+    name: gestor-iptv
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PUBLIC_BASE_URL
+        sync: false # preencha no painel: https://<seu-servico>.onrender.com
+      - key: DATABASE_URL
+        fromDatabase:
+          name: gestor-iptv-db
+          property: connectionString
+      - key: SESSION_SECRET
+        generateValue: true
+databases:
+  - name: gestor-iptv-db
+    plan: free
