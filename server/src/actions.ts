@@ -53,6 +53,42 @@ function renderTemplate(
     .replaceAll("{dias_vencido}", vars.diasVencido != null ? String(vars.diasVencido) : "");
 }
 
+const TEMPLATE_VENCE_HOJE =
+  "Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+const TEMPLATE_VENCE_3_DIAS =
+  "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+const TEMPLATE_RENOVADA =
+  "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.";
+const TEMPLATE_EXPIRADA =
+  "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+const TEMPLATE_COBRANCA =
+  "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+
+// Modelos antigos (padrão do sistema, com tudo numa frase só): contas
+// que nunca personalizaram o modelo passam a ver o modelo novo, no
+// estilo organizado pedido pela dona do gestor. Um modelo que ela
+// mesma editou (diferente destes textos) nunca é trocado.
+const LEGACY_TEMPLATES: Record<string, string[]> = {
+  warnMessage: [
+    "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: abra a sua fatura e pague com Pix: {link}",
+    "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: toque no seu link de renovação e pague com Pix.",
+  ],
+  renewedMessage: [
+    "Pagamento confirmado! ✅ Olá, {nome}! Sua assinatura foi renovada por {dias} dias. Novo vencimento: {novo_vencimento}. Usuário IPTV: {usuario}. Obrigado!",
+  ],
+  expiredMessage: [
+    "Olá, {nome}. Sua assinatura expirou em {vencimento} (há {dias_vencido} dias). Para voltar a assistir, abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
+    "Olá, {nome}. Sua assinatura expirou em {vencimento}. Para voltar a assistir, renove pelo seu link de renovação e pague com Pix. Qualquer dúvida, é só chamar aqui.",
+  ],
+  chargeMessage: [
+    "Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
+  ],
+};
+
+function upgradeLegacyTemplate(value: string, legacy: string[], replacement: string): string {
+  return legacy.includes(value.trim()) ? replacement : value;
+}
+
 const DEFAULTS = {
   warnDays: [3, 0] as number[],
   publicBaseUrl: "",
@@ -60,14 +96,11 @@ const DEFAULTS = {
   invoiceMessage:
     "Pague com Pix e sua conta é renovada assim que o pagamento for confirmado.",
   invoiceColor: "verde",
-  warnMessage:
-    "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: abra a sua fatura e pague com Pix: {link}",
-  renewedMessage:
-    "Pagamento confirmado! ✅ Olá, {nome}! Sua assinatura foi renovada por {dias} dias. Novo vencimento: {novo_vencimento}. Usuário IPTV: {usuario}. Obrigado!",
-  expiredMessage:
-    "Olá, {nome}. Sua assinatura expirou em {vencimento} (há {dias_vencido} dias). Para voltar a assistir, abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
-  chargeMessage:
-    "Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
+  warnMessage: TEMPLATE_VENCE_HOJE,
+  warnSoonMessage: TEMPLATE_VENCE_3_DIAS,
+  renewedMessage: TEMPLATE_RENOVADA,
+  expiredMessage: TEMPLATE_EXPIRADA,
+  chargeMessage: TEMPLATE_COBRANCA,
   mpAccessToken: "",
   mpPublicKey: "",
   mpVerified: false,
@@ -108,10 +141,15 @@ async function loadSettings(ctx: Ctx, ownerId: number): Promise<SettingsObj> {
     invoiceTitle: row.invoiceTitle,
     invoiceMessage: row.invoiceMessage,
     invoiceColor: row.invoiceColor,
-    warnMessage: row.warnMessage,
-    renewedMessage: row.renewedMessage,
-    expiredMessage: row.expiredMessage,
-    chargeMessage: row.chargeMessage ?? DEFAULTS.chargeMessage,
+    warnMessage: upgradeLegacyTemplate(row.warnMessage, LEGACY_TEMPLATES.warnMessage ?? [], TEMPLATE_VENCE_HOJE),
+    warnSoonMessage: row.warnSoonMessage ?? DEFAULTS.warnSoonMessage,
+    renewedMessage: upgradeLegacyTemplate(row.renewedMessage, LEGACY_TEMPLATES.renewedMessage ?? [], TEMPLATE_RENOVADA),
+    expiredMessage: upgradeLegacyTemplate(row.expiredMessage, LEGACY_TEMPLATES.expiredMessage ?? [], TEMPLATE_EXPIRADA),
+    chargeMessage: upgradeLegacyTemplate(
+      row.chargeMessage ?? DEFAULTS.chargeMessage,
+      LEGACY_TEMPLATES.chargeMessage ?? [],
+      TEMPLATE_COBRANCA,
+    ),
     mpAccessToken: row.mpAccessToken,
     mpPublicKey: row.mpPublicKey,
     mpVerified: row.mpVerified === 1,
@@ -143,6 +181,7 @@ async function persistSettings(
     invoiceMessage: string;
     invoiceColor: string;
     warnMessage: string;
+    warnSoonMessage: string;
     renewedMessage: string;
     expiredMessage: string;
     chargeMessage: string;
@@ -1054,6 +1093,34 @@ async function applyRenewal(
   return { renewalId: renewal.id, newExpires, message };
 }
 
+// Envia a mensagem de confirmação da renovação pelo WhatsApp conectado
+// por QR Code, logo depois de um pagamento real confirmado. Nunca
+// trava nem desfaz a renovação: se o WhatsApp não estiver conectado,
+// sem número ou sem resposta, volta só o motivo em texto simples,
+// que fica registrado no detalhe da cobrança.
+async function sendRenewalConfirmation(
+  ctx: Ctx,
+  client: typeof schema.clients.$inferSelect,
+  message: string,
+): Promise<string> {
+  const to = (client.whatsapp ?? "").replace(/\D/g, "");
+  if (!to) {
+    return "Mensagem de confirmação não enviada: este cliente não tem número de WhatsApp cadastrado.";
+  }
+  try {
+    const result = await ctx.executePrivileged(privileged.waSend, {
+      accountId: client.ownerId,
+      to,
+      text: message,
+    });
+    return result.sent
+      ? "Mensagem de confirmação enviada automaticamente pelo WhatsApp ✓"
+      : `Mensagem de confirmação não enviada: ${result.detail}`;
+  } catch (e) {
+    return `Mensagem de confirmação não enviada: ${String(e)}`;
+  }
+}
+
 // Executa (ou bloqueia) a extensão automática de um cliente respeitando
 // as configurações do servidor dele: o interruptor "Renovação
 // automática no painel", o modo de integração (nenhuma/própria/
@@ -1666,6 +1733,7 @@ const stateResponse = z.object({
   invoiceMessage: z.string(),
   invoiceColor: z.string(),
   warnMessage: z.string(),
+  warnSoonMessage: z.string(),
   renewedMessage: z.string(),
   expiredMessage: z.string(),
   chargeMessage: z.string(),
@@ -1863,6 +1931,7 @@ export const Actions = {
         invoiceMessage: s.invoiceMessage,
         invoiceColor: s.invoiceColor,
         warnMessage: s.warnMessage,
+        warnSoonMessage: s.warnSoonMessage,
         renewedMessage: s.renewedMessage,
         expiredMessage: s.expiredMessage,
         chargeMessage: s.chargeMessage,
@@ -2717,11 +2786,6 @@ export const Actions = {
     async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
       const ownerId = await requireAccount(ctx, args.session);
       const s = await loadSettings(ctx, ownerId);
-      if (args.liveMode && args.environment !== "producao") {
-        throw new Error(
-          "O modo ao vivo só pode ser ligado com o ambiente em Produção. No ambiente de Teste, tudo fica em validação e nenhum crédito é consumido.",
-        );
-      }
       const token = args.clearCredentials
         ? ""
         : args.accessToken.trim()
@@ -2734,14 +2798,12 @@ export const Actions = {
           : s.mpPublicKey;
       const tokenChanged = token !== s.mpAccessToken;
       const verified = args.clearCredentials || tokenChanged ? false : s.mpVerified;
-      if (args.liveMode && !token) {
-        throw new Error("Para ligar o modo ao vivo, salve primeiro o access token de produção do Mercado Pago.");
-      }
       if (args.liveMode && !verified) {
         throw new Error(
-          "Antes de ligar o modo ao vivo, salve o access token e toque em “Testar conexão”. O modo ao vivo só é liberado depois que o Mercado Pago aceita a credencial.",
+          'Antes de ligar o modo ao vivo, salve o access token e toque em "Testar conexão". O modo ao vivo só é liberado depois que o Mercado Pago aceita a credencial.',
         );
       }
+      const liveModeEffective = args.liveMode && args.environment === "producao" && verified;
       await persistSettings(ctx, ownerId, {
         mpAccessToken: token,
         mpPublicKey: publicKey,
@@ -2749,7 +2811,7 @@ export const Actions = {
         mpAccountLabel: verified ? s.mpAccountLabel : "",
         mpPayerEmail: verified ? s.mpPayerEmail : "",
         mpEnvironment: args.environment,
-        liveMode: args.liveMode && !args.clearCredentials ? 1 : 0,
+        liveMode: liveModeEffective && !args.clearCredentials ? 1 : 0,
       });
       ctx.invalidateQueries();
       return { ok: true as const };
@@ -3091,16 +3153,14 @@ export const Actions = {
             .where(eq(schema.servers.id, panelServer.id));
         }
         const applied = await applyRenewal(ctx, client, plan, payment.amountCents, "mercado_pago");
-        const waNote = client.whatsapp
-          ? " A mensagem de confirmação ficou pronta no histórico; o envio ao cliente é pelo botão de WhatsApp dele neste gestor (a Meta foi removida; o caminho automático é o QR Code)."
-          : "";
+        const waNote = await sendRenewalConfirmation(ctx, client, applied.message);
         await db
           .update(schema.payments)
           .set({
             status: "aprovado",
             wouldExpireAt: applied.newExpires,
             appliedRenewalId: applied.renewalId,
-            detail: `Extensão concluída no painel nesta nova tentativa: ${extend.detail} Créditos do plano: ${String(payment.credits)}.${waNote}`,
+            detail: `Extensão concluída no painel nesta nova tentativa: ${extend.detail} Créditos do plano: ${String(payment.credits)}. ${waNote}`,
             updatedAt: new Date(),
           })
           .where(eq(schema.payments.id, payment.id));
@@ -3215,9 +3275,7 @@ export const Actions = {
             .where(eq(schema.servers.id, panelServer.id));
         }
         const applied = await applyRenewal(ctx, client, plan, payment.amountCents, "mercado_pago");
-        const waNote = client.whatsapp
-          ? " A mensagem de confirmação ficou pronta no histórico; o envio ao cliente é pelo botão de WhatsApp dele neste gestor (a Meta foi removida; o caminho automático é o QR Code)."
-          : "";
+        const waNote = await sendRenewalConfirmation(ctx, client, applied.message);
         await db
           .update(schema.payments)
           .set({
@@ -3225,7 +3283,7 @@ export const Actions = {
             wouldExpireAt: applied.newExpires,
             appliedRenewalId: applied.renewalId,
             detail:
-              `Pagamento real aprovado e extensão concluída no painel: ${extend.detail} Vencimento atualizado no gestor. Créditos do plano: ${String(payment.credits)}.${waNote}`,
+              `Pagamento real aprovado e extensão concluída no painel: ${extend.detail} Vencimento atualizado no gestor. Créditos do plano: ${String(payment.credits)}. ${waNote}`,
             updatedAt: new Date(),
           })
           .where(eq(schema.payments.id, payment.id));
@@ -3347,16 +3405,14 @@ export const Actions = {
               }
               const result = await applyRenewal(ctx, client, plan, payment.amountCents, "mercado_pago");
               applied += 1;
-              const waNote = client.whatsapp
-                ? " A mensagem de confirmação ficou pronta no histórico para envio pelo WhatsApp do cliente."
-                : "";
+              const waNote = await sendRenewalConfirmation(ctx, client, result.message);
               await db
                 .update(schema.payments)
                 .set({
                   status: "aprovado",
                   wouldExpireAt: result.newExpires,
                   appliedRenewalId: result.renewalId,
-                  detail: `Pagamento real aprovado, extensão concluída no painel e renovação aplicada uma única vez.${waNote}`,
+                  detail: `Pagamento real aprovado, extensão concluída no painel e renovação aplicada uma única vez. ${waNote}`,
                   updatedAt: new Date(),
                 })
                 .where(eq(schema.payments.id, payment.id));
@@ -3842,6 +3898,7 @@ export const Actions = {
     request: z.object({
       session: sessionField,
       warnMessage: z.string().min(1).max(1000),
+      warnSoonMessage: z.string().min(1).max(1000).optional(),
       renewedMessage: z.string().min(1).max(1000),
       expiredMessage: z.string().min(1).max(1000),
       chargeMessage: z.string().min(1).max(1000).optional(),
@@ -3851,6 +3908,9 @@ export const Actions = {
       const ownerId = await requireAccount(ctx, args.session);
       await persistSettings(ctx, ownerId, {
         warnMessage: args.warnMessage,
+        ...(args.warnSoonMessage !== undefined
+          ? { warnSoonMessage: args.warnSoonMessage }
+          : {}),
         renewedMessage: args.renewedMessage,
         expiredMessage: args.expiredMessage,
         ...(args.chargeMessage !== undefined
