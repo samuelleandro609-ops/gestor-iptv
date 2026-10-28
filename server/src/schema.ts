@@ -327,14 +327,16 @@ export const settings = pgTable("settings", {
   expiredMessage: text("expired_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "Bom dia {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
-  // Modelo "Cobrança" do envio direto de mensagem ao cliente (botão
-  // Enviar mensagem na lista de clientes): editável na aba Mensagens.
+  // Modelo "Vence amanhã" do envio direto de mensagem ao cliente
+  // (botão Enviar mensagem na lista de clientes): editável na aba
+  // Mensagens. O campo continua se chamando charge_message no banco
+  // para não precisar migrar dados; só o texto e o rótulo mudaram.
   chargeMessage: text("charge_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "Bom dia {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   whatsappStatus: text("whatsapp_status")
     .notNull()
