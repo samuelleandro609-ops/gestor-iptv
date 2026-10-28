@@ -13,7 +13,7 @@ export const accounts = pgTable("accounts", {
     .notNull()
     .$defaultFn(() => new Date()),
   // Papel e assinatura do gestor: a primeira conta do banco é a
-  // administradora (dona). Conta nova começa em teste grátis de 5
+  // administradora (dona). Conta nova começa em teste grátis de 7
   // dias (trialEndsAt); depois, sem assinatura paga, o acesso à
   // interface bloqueia — SEM apagar nenhum dado (bloqueio é só de
   // acesso; tudo permanece e volta ao pagar). subStatus 'blocked' é
