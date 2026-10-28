@@ -47,28 +47,31 @@ export async function createDb(): Promise<Db> {
   return drizzlePglite(pglite, { schema });
 }
 
-/** Cria todas as tabelas vazias a partir de migrations/001_init.sql.
- *  Idempotente (CREATE TABLE IF NOT EXISTS): rodar de novo não apaga
+/** Cria todas as tabelas vazias a partir das migrations em
+ *  migrations/*.sql, em ordem. Idempotente (CREATE TABLE IF NOT
+ *  EXISTS / ADD COLUMN IF NOT EXISTS): rodar de novo não apaga
  *  dados. Não há migração de dados do gestor dentro do Muse — esta
  *  base começa vazia, como uma conta nova. */
 export async function migrate(db: Db): Promise<void> {
-  const sqlText = readFileSync(
-    join(import.meta.dir, "..", "..", "migrations", "001_init.sql"),
-    "utf8",
-  );
-  // Remove linhas de comentário ANTES de dividir: a primeira instrução
-  // vem logo depois do cabeçalho comentado e seria descartada junto
-  // com ele se o filtro olhasse o começo do bloco.
-  const withoutComments = sqlText
-    .split("\n")
-    .filter((line) => !line.trim().startsWith("--"))
-    .join("\n");
-  const statements = withoutComments
-    .split(/;\s*\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  for (const stmt of statements) {
-    await db.execute(sql.raw(stmt));
+  for (const file of ["001_init.sql", "002_admin_trial.sql"]) {
+    const sqlText = readFileSync(
+      join(import.meta.dir, "..", "..", "migrations", file),
+      "utf8",
+    );
+    // Remove linhas de comentário ANTES de dividir: a primeira instrução
+    // vem logo depois do cabeçalho comentado e seria descartada junto
+    // com ele se o filtro olhasse o começo do bloco.
+    const withoutComments = sqlText
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("--"))
+      .join("\n");
+    const statements = withoutComments
+      .split(/;\s*\n/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const stmt of statements) {
+      await db.execute(sql.raw(stmt));
+    }
   }
 }
 
