@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
-import { asc, desc, eq } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const okResponse = z.object({ ok: z.literal(true) });
@@ -121,6 +121,12 @@ const DEFAULTS = {
   waTranscribeAudio: false,
   waAwayEnabled: false,
   waAwayMessage: "",
+  // E-mail (Resend) e valor padrão da assinatura, da administradora.
+  // A chave do Resend NUNCA volta nas respostas: getState expõe só
+  // hasResendKey. O valor padrão é 0 (sem valor) até ela definir.
+  resendApiKey: "",
+  resendFrom: "",
+  defaultSubPriceCents: 0,
 };
 
 type SettingsObj = typeof DEFAULTS;
@@ -170,6 +176,9 @@ async function loadSettings(ctx: Ctx, ownerId: number): Promise<SettingsObj> {
     waTranscribeAudio: row.waTranscribeAudio === 1,
     waAwayEnabled: row.waAwayEnabled === 1,
     waAwayMessage: row.waAwayMessage ?? "",
+    resendApiKey: row.resendApiKey ?? "",
+    resendFrom: row.resendFrom ?? "",
+    defaultSubPriceCents: row.defaultSubPriceCents ?? 0,
   };
 }
 
@@ -205,6 +214,9 @@ async function persistSettings(
     waTranscribeAudio: number;
     waAwayEnabled: number;
     waAwayMessage: string;
+    resendApiKey: string;
+    resendFrom: string;
+    defaultSubPriceCents: number;
   }>,
 ) {
   const db = ctx.db<typeof schema>();
@@ -351,6 +363,184 @@ async function requireAccount(ctx: Ctx, session: string | undefined): Promise<nu
 }
 
 const sessionField = z.string().optional();
+
+// ---------------- Administração, teste grátis e assinatura ----------------
+// A dona do gestor é a administradora: a primeira conta do banco (ou o
+// e-mail de ADMIN_EMAIL, se definido no ambiente). SENHAS NUNCA SÃO
+// EXIBIDAS: as contas guardam só o hash (passHash) e nenhuma ação
+// devolve senha nem hash — a Administração vê e-mail, datas, status,
+// valor e contagens. Conta vencida NUNCA perde dados: o bloqueio é
+// só de acesso à interface; clientes, servidores, planos e cobranças
+// permanecem intactos e voltam ao pagar (30 dias por pagamento).
+
+const SUBSCRIPTION_DAYS = 30;
+const TRIAL_DAYS = 5;
+
+type AccountRow = typeof schema.accounts.$inferSelect;
+
+function isAdminAccount(row: Pick<AccountRow, "role" | "email">): boolean {
+  if (row.role === "admin") return true;
+  const envEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  return !!envEmail && row.email.toLowerCase() === envEmail;
+}
+
+async function loadAccountRow(ctx: Ctx, accountId: number): Promise<AccountRow | null> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId));
+  return rows[0] ?? null;
+}
+
+// A conta administradora: a de role 'admin', ou o e-mail de
+// ADMIN_EMAIL, ou (último recurso) a de menor id — que é a conta
+// criada primeiro no deploy, ou seja, a da dona.
+async function findAdminAccountId(ctx: Ctx): Promise<number | null> {
+  const db = ctx.db<typeof schema>();
+  const rows = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id));
+  if (rows.length === 0) return null;
+  const flagged = rows.find((r) => isAdminAccount(r));
+  return (flagged ?? rows[0]!).id;
+}
+
+async function loadAdminSettings(ctx: Ctx): Promise<{ adminId: number | null; settings: SettingsObj }> {
+  const adminId = await findAdminAccountId(ctx);
+  if (adminId == null) return { adminId: null, settings: { ...DEFAULTS } };
+  return { adminId, settings: await loadSettings(ctx, adminId) };
+}
+
+type AccountAccess = {
+  isAdmin: boolean;
+  role: string;
+  subStatus: string;
+  blocked: boolean;
+  trialEndsAt: string | null;
+  subExpiresAt: string | null;
+  priceCents: number;
+  daysLeft: number;
+};
+
+function computeAccountAccess(
+  row: AccountRow,
+  adminDefaultPriceCents: number,
+  nowMs: number,
+): AccountAccess {
+  const isAdmin = isAdminAccount(row);
+  const trialMs = row.trialEndsAt ? row.trialEndsAt.getTime() : null;
+  const subMs = row.subExpiresAt ? row.subExpiresAt.getTime() : null;
+  const ends = [trialMs, subMs].filter((v): v is number => v != null);
+  const endMs = ends.length ? Math.max(...ends) : null;
+  const daysLeft = endMs == null ? 0 : Math.max(0, Math.ceil((endMs - nowMs) / 86_400_000));
+  // Bloqueio manual ('blocked') vale mesmo dentro do teste. Fora
+  // disso, bloqueia quando o teste acabou E não há assinatura válida.
+  const timeBlocked =
+    (trialMs == null || nowMs > trialMs) && (subMs == null || nowMs > subMs);
+  const blocked = !isAdmin && (row.subStatus === "blocked" || timeBlocked);
+  return {
+    isAdmin,
+    role: row.role,
+    subStatus: row.subStatus,
+    blocked,
+    trialEndsAt: row.trialEndsAt ? row.trialEndsAt.toISOString() : null,
+    subExpiresAt: row.subExpiresAt ? row.subExpiresAt.toISOString() : null,
+    priceCents: row.subPriceCents > 0 ? row.subPriceCents : adminDefaultPriceCents,
+    daysLeft,
+  };
+}
+
+async function loadAccountAccess(ctx: Ctx, accountId: number): Promise<AccountAccess | null> {
+  const row = await loadAccountRow(ctx, accountId);
+  if (!row) return null;
+  const { settings } = await loadAdminSettings(ctx);
+  return computeAccountAccess(row, settings.defaultSubPriceCents, Date.now());
+}
+
+async function requireAdmin(ctx: Ctx, session: string | undefined): Promise<number> {
+  const ownerId = await requireAccount(ctx, session);
+  const row = await loadAccountRow(ctx, ownerId);
+  if (!row || !isAdminAccount(row)) {
+    throw new Error("Somente a administradora pode ver esta área.");
+  }
+  return ownerId;
+}
+
+// E-mail via Resend, com fetch puro (sem dependência nova). A chave
+// nunca aparece em erro, log ou resposta.
+async function sendResendEmail(args: {
+  apiKey: string;
+  from: string;
+  to: string;
+  subject: string;
+  html: string;
+  text: string;
+}): Promise<{ ok: boolean; detail: string }> {
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${args.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: args.from,
+        to: [args.to],
+        subject: args.subject,
+        html: args.html,
+        text: args.text,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) {
+      const data: unknown = await res.json().catch(() => null);
+      const msg =
+        data && typeof data === "object" && "message" in data
+          ? String((data as { message: unknown }).message)
+          : `HTTP ${res.status}`;
+      return { ok: false, detail: `O serviço de e-mail respondeu: ${msg}. Confira a chave e o remetente.` };
+    }
+    return { ok: true, detail: "E-mail enviado." };
+  } catch {
+    return { ok: false, detail: "Não foi possível falar com o serviço de e-mail nesta tentativa." };
+  }
+}
+
+function resetLinkUrl(publicBaseUrl: string, token: string): string {
+  const base = publicBaseUrl.trim().replace(/\/+$/, "");
+  return `${base}#/redefinir-senha?token=${token}`;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+// Pagamento da assinatura aprovado: libera APENAS 30 dias, contados
+// do fim do período atual (se ainda válido) ou de agora. Idempotente
+// por cobrança: só aplica uma vez (status 'aprovado' + paidAt).
+async function applySubscriptionApproval(
+  ctx: Ctx,
+  accountId: number,
+  subscriptionPaymentId: number,
+): Promise<Date> {
+  const db = ctx.db<typeof schema>();
+  const row = await loadAccountRow(ctx, accountId);
+  const nowMs = Date.now();
+  const baseMs = Math.max(nowMs, row?.subExpiresAt ? row.subExpiresAt.getTime() : 0);
+  const expiresAt = new Date(baseMs + SUBSCRIPTION_DAYS * 24 * 60 * 60 * 1000);
+  await db
+    .update(schema.subscriptionPayments)
+    .set({ status: "aprovado", paidAt: new Date(nowMs) })
+    .where(eq(schema.subscriptionPayments.id, subscriptionPaymentId));
+  await db
+    .update(schema.accounts)
+    .set({ subExpiresAt: expiresAt, subStatus: "active" })
+    .where(eq(schema.accounts.id, accountId));
+  return expiresAt;
+}
 
 // O painel só é considerado conectado quando existe um servidor com o
 // token da API salvo E o teste de autenticação dessa API já passou
@@ -1232,6 +1422,19 @@ async function panelExtendForClient(
   extend: { ok: boolean; detail: string };
 }> {
   const db = ctx.db<typeof schema>();
+  // Conta do gestor vencida/bloqueada não estende ninguém: o acesso
+  // volta ao pagar, sem apagar nada — e nenhum crédito é consumido.
+  const access = await loadAccountAccess(ctx, client.ownerId);
+  if (access?.blocked) {
+    return {
+      panelServer: null,
+      extend: {
+        ok: false,
+        detail:
+          "A assinatura desta conta do gestor está vencida. Renove a assinatura do gestor para voltar a renovar clientes — nenhum dado foi apagado e nenhum crédito foi consumido.",
+      },
+    };
+  }
   let own: typeof schema.servers.$inferSelect | undefined;
   if (client.serverId != null) {
     const rows = await db
@@ -1368,7 +1571,14 @@ type MpCreateResult =
 // access token salvo pela dona do gestor. Nunca inclui o token em erros.
 async function mpCreatePix(
   token: string,
-  args: { amountCents: number; clientName: string; clientId: number; payerEmail: string },
+  args: {
+    amountCents: number;
+    clientName: string;
+    clientId: number;
+    payerEmail: string;
+    description?: string;
+    externalReference?: string;
+  },
 ): Promise<MpCreateResult> {
   // A API do Mercado Pago exige payer.email em formato válido e
   // recusava o antigo "cliente@gestor-iptv.local" ("payer.email must
@@ -1390,9 +1600,9 @@ async function mpCreatePix(
       },
       body: JSON.stringify({
         transaction_amount: args.amountCents / 100,
-        description: `Renovação IPTV — ${args.clientName}`,
+        description: args.description ?? `Renovação IPTV — ${args.clientName}`,
         payment_method_id: "pix",
-        external_reference: `gestor-cliente-${args.clientId}`,
+        external_reference: args.externalReference ?? `gestor-cliente-${args.clientId}`,
         metadata: { gestor_client_id: args.clientId },
         payer: { email: payerEmail },
       }),
@@ -1872,6 +2082,43 @@ const stateResponse = z.object({
       active: z.boolean(),
     }),
   ),
+  // Administração / assinatura: isAdmin só é true para a
+  // administradora; tenants só vem preenchido para ela (sem senha
+  // nem hash, nunca). access diz se a conta está bloqueada e até
+  // quando vale o teste/assinatura.
+  isAdmin: z.boolean(),
+  access: z.object({
+    blocked: z.boolean(),
+    trialEndsAt: z.string().nullable(),
+    subExpiresAt: z.string().nullable(),
+    priceCents: z.number(),
+    daysLeft: z.number(),
+    subStatus: z.string(),
+    role: z.string(),
+  }),
+  tenants: z.array(
+    z.object({
+      id: z.number(),
+      email: z.string(),
+      role: z.string(),
+      createdAt: z.string(),
+      trialEndsAt: z.string().nullable(),
+      subExpiresAt: z.string().nullable(),
+      subStatus: z.string(),
+      subPriceCents: z.number(),
+      lastLoginAt: z.string().nullable(),
+      clientCount: z.number(),
+      serverCount: z.number(),
+      planCount: z.number(),
+    }),
+  ),
+  adminSettings: z
+    .object({
+      defaultSubPriceCents: z.number(),
+      resendFrom: z.string(),
+      hasResendKey: z.boolean(),
+    })
+    .nullable(),
 });
 
 export const Actions = {
@@ -1899,6 +2146,59 @@ export const Actions = {
       const serverById = new Map<number, typeof schema.servers.$inferSelect>(serverRows.map((x) => [x.id, x]));
       const planById = new Map<number, typeof schema.plans.$inferSelect>(planRows.map((x) => [x.id, x]));
       const invoiceTokens = await ensureInvoiceTokens(ctx, clientRows);
+      // Acesso da própria conta (teste/assinatura/bloqueio) e, só
+      // para a administradora, a lista de contas registradas — com
+      // colunas explícitas, SEM passHash (senha/hash nunca voltam).
+      const meRow = accountRows[0];
+      const { settings: adminSettingsObj } = await loadAdminSettings(ctx);
+      const access: AccountAccess = meRow
+        ? computeAccountAccess(meRow, adminSettingsObj.defaultSubPriceCents, Date.now())
+        : {
+            isAdmin: false,
+            role: "user",
+            subStatus: "trial",
+            blocked: false,
+            trialEndsAt: null,
+            subExpiresAt: null,
+            priceCents: 0,
+            daysLeft: 0,
+          };
+      let tenants: z.infer<typeof stateResponse>["tenants"] = [];
+      if (access.isAdmin) {
+        const allAccounts = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id));
+        const [clientCounts, serverCounts, planCounts] = await Promise.all([
+          db
+            .select({ ownerId: schema.clients.ownerId, count: sql<number>`count(*)` })
+            .from(schema.clients)
+            .groupBy(schema.clients.ownerId),
+          db
+            .select({ ownerId: schema.servers.ownerId, count: sql<number>`count(*)` })
+            .from(schema.servers)
+            .groupBy(schema.servers.ownerId),
+          db
+            .select({ ownerId: schema.plans.ownerId, count: sql<number>`count(*)` })
+            .from(schema.plans)
+            .groupBy(schema.plans.ownerId),
+        ]);
+        const countOf = (
+          rows: Array<{ ownerId: number; count: number | string }>,
+          id: number,
+        ): number => Number(rows.find((r) => r.ownerId === id)?.count ?? 0);
+        tenants = allAccounts.map((a) => ({
+          id: a.id,
+          email: a.email,
+          role: a.role,
+          createdAt: a.createdAt.toISOString(),
+          trialEndsAt: a.trialEndsAt ? a.trialEndsAt.toISOString() : null,
+          subExpiresAt: a.subExpiresAt ? a.subExpiresAt.toISOString() : null,
+          subStatus: a.subStatus,
+          subPriceCents: a.subPriceCents,
+          lastLoginAt: a.lastLoginAt ? a.lastLoginAt.toISOString() : null,
+          clientCount: countOf(clientCounts, a.id),
+          serverCount: countOf(serverCounts, a.id),
+          planCount: countOf(planCounts, a.id),
+        }));
+      }
       return {
         servers: serverRows.map((x) => ({
           id: x.id,
@@ -2081,7 +2381,25 @@ export const Actions = {
           syncedAt: x.syncedAt ? new Date(x.syncedAt).toISOString() : null,
           createdAt: x.createdAt.toISOString(),
         })),
-        accountEmail: accountRows[0]?.email ?? "", 
+        accountEmail: accountRows[0]?.email ?? "",
+        isAdmin: access.isAdmin,
+        access: {
+          blocked: access.blocked,
+          trialEndsAt: access.trialEndsAt,
+          subExpiresAt: access.subExpiresAt,
+          priceCents: access.priceCents,
+          daysLeft: access.daysLeft,
+          subStatus: access.subStatus,
+          role: access.role,
+        },
+        tenants,
+        adminSettings: access.isAdmin
+          ? {
+              defaultSubPriceCents: adminSettingsObj.defaultSubPriceCents,
+              resendFrom: adminSettingsObj.resendFrom,
+              hasResendKey: adminSettingsObj.resendApiKey.length > 0,
+            }
+          : null,
       };
     },
   }),
@@ -3036,6 +3354,16 @@ export const Actions = {
         const ownerId = await requireAccount(ctx, args.session);
         if (client.ownerId !== ownerId) throw new Error("Cliente não encontrado nesta conta.");
       }
+      // Conta do gestor vencida/bloqueada não gera cobrança Pix para
+      // os clientes IPTV dela: o acesso volta ao pagar, sem apagar
+      // nada. A fatura pública do cliente também fica sem Pix novo
+      // até a assinatura do gestor ser renovada.
+      const tenantAccess = await loadAccountAccess(ctx, client.ownerId);
+      if (tenantAccess?.blocked) {
+        throw new Error(
+          "A assinatura desta conta do gestor está vencida. Renove a assinatura do gestor para gerar novas cobranças — nenhum dado foi apagado.",
+        );
+      }
       const s = await loadSettings(ctx, client.ownerId);
       const panel = await loadPanelStatus(ctx, client.ownerId);
       const fullAmountCents = client.priceOverrideCents ?? plan.priceCents;
@@ -3531,6 +3859,30 @@ export const Actions = {
             .update(schema.payments)
             .set({ status: "recusado", updatedAt: new Date() })
             .where(eq(schema.payments.id, payment.id));
+        }
+      }
+      // Assinaturas do gestor: consulta as cobranças de assinatura
+      // pendentes com o Mercado Pago da administradora e, ao
+      // aprovar, libera 30 dias (uma vez só por cobrança). Nenhum
+      // dado de conta vencida é apagado em nenhum caminho aqui.
+      const subPending = await db
+        .select()
+        .from(schema.subscriptionPayments)
+        .where(eq(schema.subscriptionPayments.status, "pendente"))
+        .orderBy(asc(schema.subscriptionPayments.id));
+      for (const sub of subPending.slice(0, 25)) {
+        if (!sub.mpPaymentId) continue;
+        const { settings: adminSettings } = await loadAdminSettings(ctx);
+        if (!adminSettings.mpAccessToken) continue;
+        const subCheck = await mpGetPaymentStatus(adminSettings.mpAccessToken, sub.mpPaymentId);
+        if (!subCheck.ok) continue;
+        if (subCheck.status === "approved") {
+          await applySubscriptionApproval(ctx, sub.accountId, sub.id);
+        } else if (subCheck.status === "rejected" || subCheck.status === "cancelled") {
+          await db
+            .update(schema.subscriptionPayments)
+            .set({ status: "recusado" })
+            .where(eq(schema.subscriptionPayments.id, sub.id));
         }
       }
       ctx.invalidateQueries();
@@ -4107,9 +4459,20 @@ export const Actions = {
       }
       const isFirstAccount = existing.length === 0;
       const passHash = await hashPassword(args.password);
+      const now = new Date();
+      const trialEndsAt = new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
       const inserted = await db
         .insert(schema.accounts)
-        .values({ email, passHash })
+        .values({
+          email,
+          passHash,
+          // A primeira conta do banco é a administradora (dona). Conta
+          // nova começa em teste grátis de 5 dias (subStatus 'trial').
+          role: isFirstAccount ? "admin" : "user",
+          trialEndsAt,
+          subStatus: isFirstAccount ? "active" : "trial",
+          lastLoginAt: now,
+        })
         .returning({ id: schema.accounts.id });
       const account = inserted[0];
       if (!account) throw new Error("Não foi possível criar a conta.");
@@ -4137,6 +4500,29 @@ export const Actions = {
       }
       const token = await createSession(ctx, account.id);
       ctx.invalidateQueries();
+      // E-mail de boas-vindas (melhor esforço): só sai se a
+      // administradora configurou o envio (chave Resend). Traz o
+      // endereço do gestor, o e-mail e o fim do teste — NUNCA a
+      // senha. Se o e-mail falhar, o registro continua valendo.
+      try {
+        const { settings: adminSettings } = await loadAdminSettings(ctx);
+        if (adminSettings.resendApiKey && adminSettings.resendFrom && !isFirstAccount) {
+          const gestorUrl = adminSettings.publicBaseUrl
+            ? adminSettings.publicBaseUrl.replace(/\/+$/, "")
+            : "";
+          const trialText = fmtDate(trialEndsAt);
+          await sendResendEmail({
+            apiKey: adminSettings.resendApiKey,
+            from: adminSettings.resendFrom,
+            to: email,
+            subject: "Bem-vindo ao Gestor IPTV — sua conta foi criada",
+            text: `Sua conta no Gestor IPTV foi criada.\n\nE-mail de acesso: ${email}\nTeste grátis até: ${trialText}\n\nAcesse o gestor em: ${gestorUrl || "o endereço que a administradora informou"}\n\nDepois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.\n\nSe esquecer a senha, use "Esqueci a senha" na tela de login.`,
+            html: `<p>Sua conta no Gestor IPTV foi criada.</p><p><strong>E-mail de acesso:</strong> ${escapeHtml(email)}<br><strong>Teste grátis até:</strong> ${escapeHtml(trialText)}</p><p>Acesse o gestor em: ${gestorUrl ? `<a href="${escapeHtml(gestorUrl)}">${escapeHtml(gestorUrl)}</a>` : "o endereço que a administradora informou"}</p><p>Depois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.</p><p>Se esquecer a senha, use "Esqueci a senha" na tela de login.</p>`,
+          });
+        }
+      } catch {
+        // E-mail de boas-vindas nunca quebra o registro.
+      }
       return { token, email, claimedLegacy };
     },
   }),
@@ -4166,6 +4552,10 @@ export const Actions = {
           "A senha está errada para este e-mail. Confira a senha e tente de novo.",
         );
       }
+      await db
+        .update(schema.accounts)
+        .set({ lastLoginAt: new Date() })
+        .where(eq(schema.accounts.id, account.id));
       const token = await createSession(ctx, account.id);
       ctx.invalidateQueries();
       return { token, email: account.email };
@@ -4203,6 +4593,441 @@ export const Actions = {
       } catch {
         return { loggedIn: false, email: "" };
       }
+    },
+  }),
+
+  // ---------------- Administração, assinatura e senha esquecida ----------------
+  // Tudo aqui é só da administradora (exceto a assinatura do próprio
+  // inquilino e a redefinição de senha). Nenhuma resposta traz senha
+  // nem hash: a lista de contas mostra e-mail, datas, status, valor
+  // e contagens. O bloqueio nunca apaga dados — é só de acesso.
+
+  listTenantAccounts: defineAction({
+    request: z.object({ session: sessionField }),
+    response: z.object({
+      tenants: z.array(
+        z.object({
+          id: z.number(),
+          email: z.string(),
+          role: z.string(),
+          createdAt: z.string(),
+          trialEndsAt: z.string().nullable(),
+          subExpiresAt: z.string().nullable(),
+          subStatus: z.string(),
+          subPriceCents: z.number(),
+          lastLoginAt: z.string().nullable(),
+          clientCount: z.number(),
+          serverCount: z.number(),
+          planCount: z.number(),
+        }),
+      ),
+    }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const allAccounts = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id));
+      const [clientCounts, serverCounts, planCounts] = await Promise.all([
+        db
+          .select({ ownerId: schema.clients.ownerId, count: sql<number>`count(*)` })
+          .from(schema.clients)
+          .groupBy(schema.clients.ownerId),
+        db
+          .select({ ownerId: schema.servers.ownerId, count: sql<number>`count(*)` })
+          .from(schema.servers)
+          .groupBy(schema.servers.ownerId),
+        db
+          .select({ ownerId: schema.plans.ownerId, count: sql<number>`count(*)` })
+          .from(schema.plans)
+          .groupBy(schema.plans.ownerId),
+      ]);
+      const countOf = (
+        rows: Array<{ ownerId: number; count: number | string }>,
+        id: number,
+      ): number => Number(rows.find((r) => r.ownerId === id)?.count ?? 0);
+      return {
+        tenants: allAccounts.map((a) => ({
+          id: a.id,
+          email: a.email,
+          role: a.role,
+          createdAt: a.createdAt.toISOString(),
+          trialEndsAt: a.trialEndsAt ? a.trialEndsAt.toISOString() : null,
+          subExpiresAt: a.subExpiresAt ? a.subExpiresAt.toISOString() : null,
+          subStatus: a.subStatus,
+          subPriceCents: a.subPriceCents,
+          lastLoginAt: a.lastLoginAt ? a.lastLoginAt.toISOString() : null,
+          clientCount: countOf(clientCounts, a.id),
+          serverCount: countOf(serverCounts, a.id),
+          planCount: countOf(planCounts, a.id),
+        })),
+      };
+    },
+  }),
+
+  setTenantPrice: defineAction({
+    request: z.object({
+      session: sessionField,
+      accountId: z.number().int().positive(),
+      priceCents: z.number().int().min(0).max(10_000_000),
+    }),
+    response: okResponse,
+    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const row = await loadAccountRow(ctx, args.accountId);
+      if (!row) throw new Error("Conta não encontrada.");
+      if (isAdminAccount(row)) throw new Error("A conta administradora não tem valor de assinatura.");
+      await db
+        .update(schema.accounts)
+        .set({ subPriceCents: args.priceCents })
+        .where(eq(schema.accounts.id, args.accountId));
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
+  grantTenantAccess: defineAction({
+    request: z.object({
+      session: sessionField,
+      accountId: z.number().int().positive(),
+      days: z.number().int().min(1).max(365),
+    }),
+    response: okResponse,
+    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const row = await loadAccountRow(ctx, args.accountId);
+      if (!row) throw new Error("Conta não encontrada.");
+      const nowMs = Date.now();
+      const baseMs = Math.max(nowMs, row.subExpiresAt ? row.subExpiresAt.getTime() : 0);
+      await db
+        .update(schema.accounts)
+        .set({
+          subExpiresAt: new Date(baseMs + args.days * 24 * 60 * 60 * 1000),
+          subStatus: "active",
+        })
+        .where(eq(schema.accounts.id, args.accountId));
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
+  setTenantBlocked: defineAction({
+    request: z.object({
+      session: sessionField,
+      accountId: z.number().int().positive(),
+      blocked: z.boolean(),
+    }),
+    response: okResponse,
+    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const row = await loadAccountRow(ctx, args.accountId);
+      if (!row) throw new Error("Conta não encontrada.");
+      if (isAdminAccount(row)) throw new Error("A conta administradora nunca é bloqueada.");
+      // Bloqueio manual: não apaga nada, só impede o acesso à
+      // interface até a administradora desbloquear ou a conta pagar.
+      await db
+        .update(schema.accounts)
+        .set({ subStatus: args.blocked ? "blocked" : "active" })
+        .where(eq(schema.accounts.id, args.accountId));
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
+  adminResetLink: defineAction({
+    request: z.object({ session: sessionField, accountId: z.number().int().positive() }),
+    response: z.object({ link: z.string() }),
+    async handler(ctx, args) {
+      await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const row = await loadAccountRow(ctx, args.accountId);
+      if (!row) throw new Error("Conta não encontrada.");
+      // Invalida links anteriores desta conta: só o link novo vale.
+      await db
+        .update(schema.passwordResets)
+        .set({ used: 1 })
+        .where(eq(schema.passwordResets.accountId, args.accountId));
+      const token = generateInvoiceToken();
+      await db.insert(schema.passwordResets).values({
+        accountId: args.accountId,
+        tokenHash: await sha256Hex(token),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        used: 0,
+      });
+      const { settings } = await loadAdminSettings(ctx);
+      return { link: resetLinkUrl(settings.publicBaseUrl, token) };
+    },
+  }),
+
+  adminEmailSettings: defineAction({
+    request: z.object({
+      session: sessionField,
+      resendApiKey: z.string().max(400),
+      resendFrom: z.string().max(200),
+      defaultSubPriceCents: z.number().int().min(0).max(10_000_000),
+    }),
+    response: z.object({ ok: z.literal(true), hasResendKey: z.boolean() }),
+    async handler(ctx, args) {
+      const ownerId = await requireAdmin(ctx, args.session);
+      const s = await loadSettings(ctx, ownerId);
+      // Chave em branco mantém a salva (mesmo padrão do Mercado Pago):
+      // a chave nunca volta para a tela.
+      const key = args.resendApiKey.trim() ? args.resendApiKey.trim() : s.resendApiKey;
+      await persistSettings(ctx, ownerId, {
+        resendApiKey: key,
+        resendFrom: args.resendFrom.trim(),
+        defaultSubPriceCents: args.defaultSubPriceCents,
+      });
+      ctx.invalidateQueries();
+      return { ok: true as const, hasResendKey: key.length > 0 };
+    },
+  }),
+
+  testEmailSend: defineAction({
+    request: z.object({ session: sessionField, to: z.string().max(200).optional() }),
+    response: z.object({ ok: z.boolean(), detail: z.string() }),
+    async handler(ctx, args) {
+      const ownerId = await requireAdmin(ctx, args.session);
+      const s = await loadSettings(ctx, ownerId);
+      const db = ctx.db<typeof schema>();
+      const meRow = await loadAccountRow(ctx, ownerId);
+      const to = (args.to ?? "").trim() || meRow?.email || "";
+      if (!s.resendApiKey || !s.resendFrom) {
+        return {
+          ok: false,
+          detail: "Falta configurar a chave do Resend e o remetente antes de testar o envio.",
+        };
+      }
+      if (!to) return { ok: false, detail: "Informe um e-mail de destino para o teste." };
+      const result = await sendResendEmail({
+        apiKey: s.resendApiKey,
+        from: s.resendFrom,
+        to,
+        subject: "Teste de e-mail do Gestor IPTV",
+        text: "Este é um e-mail de teste do Gestor IPTV. Se você recebeu, o envio de e-mails está funcionando.",
+        html: "<p>Este é um e-mail de teste do Gestor IPTV. Se você recebeu, o envio de e-mails está funcionando.</p>",
+      });
+      return result;
+    },
+  }),
+
+  // Gera o Pix da assinatura do gestor (30 dias). Usa o Mercado Pago
+  // DA CONTA ADMINISTRADORA, com as mesmas travas do Pix dos
+  // clientes: credencial verificada + modo ao vivo + produção. O
+  // valor é o da conta ou o padrão definido pela administradora;
+  // sem valor definido, erro honesto — nenhum valor é inventado.
+  createSubscriptionPix: defineAction({
+    request: z.object({ session: sessionField }),
+    response: z.object({
+      id: z.number(),
+      pixCode: z.string().nullable(),
+      status: z.string(),
+      detail: z.string(),
+      amountCents: z.number(),
+      mpPaymentId: z.string().nullable(),
+    }),
+    async handler(ctx, args) {
+      const ownerId = await requireAccount(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const row = await loadAccountRow(ctx, ownerId);
+      if (!row) throw new Error("Conta não encontrada.");
+      if (isAdminAccount(row)) {
+        throw new Error("A conta administradora não precisa de assinatura.");
+      }
+      const { settings: adminSettings } = await loadAdminSettings(ctx);
+      const access = await loadAccountAccess(ctx, ownerId);
+      const amountCents = access?.priceCents ?? 0;
+      if (amountCents <= 0) {
+        throw new Error(
+          "O valor da assinatura ainda não foi definido pela administradora. Fale com ela para definir o valor e gerar o Pix.",
+        );
+      }
+      if (!adminSettings.mpAccessToken || !adminSettings.mpVerified || !adminSettings.liveMode || adminSettings.mpEnvironment !== "producao") {
+        throw new Error(
+          "O pagamento da assinatura ainda não está configurado pela administradora (Mercado Pago em produção com modo ao vivo). Fale com ela e tente de novo.",
+        );
+      }
+      let payerEmail = adminSettings.mpPayerEmail;
+      if (!payerEmail) {
+        const me = await mpTestConnection(adminSettings.mpAccessToken);
+        if (me.connected && me.email) payerEmail = me.email;
+      }
+      const created = await mpCreatePix(adminSettings.mpAccessToken, {
+        amountCents,
+        clientName: row.email,
+        clientId: row.id,
+        payerEmail,
+        description: `Assinatura do Gestor IPTV (30 dias) — ${row.email}`,
+        externalReference: `gestor-assinatura-${row.id}`,
+      });
+      if (created.kind === "failed") {
+        throw new Error(created.detail);
+      }
+      const inserted = await db
+        .insert(schema.subscriptionPayments)
+        .values({
+          accountId: ownerId,
+          mpPaymentId: created.mpPaymentId || null,
+          amountCents,
+          status: "pendente",
+        })
+        .returning({ id: schema.subscriptionPayments.id });
+      const subRow = inserted[0];
+      if (!subRow) throw new Error("Não foi possível gerar a cobrança da assinatura.");
+      ctx.invalidateQueries();
+      return {
+        id: subRow.id,
+        pixCode: created.pixCode,
+        status: "pendente",
+        detail: "Pix da assinatura criado. Pague com o código Pix e toque em “Já paguei — verificar agora”. Ao confirmar, o acesso é liberado por 30 dias e nenhum dado é apagado.",
+        amountCents,
+        mpPaymentId: created.mpPaymentId || null,
+      };
+    },
+  }),
+
+  checkSubscriptionPaymentStatus: defineAction({
+    request: z.object({
+      session: sessionField,
+      subscriptionPaymentId: z.number().int().positive(),
+    }),
+    response: z.object({
+      status: z.string(),
+      detail: z.string(),
+      subExpiresAt: z.string().nullable(),
+    }),
+    async handler(ctx, args) {
+      const ownerId = await requireAccount(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const rows = await db
+        .select()
+        .from(schema.subscriptionPayments)
+        .where(eq(schema.subscriptionPayments.id, args.subscriptionPaymentId));
+      const sub = rows[0];
+      if (!sub) throw new Error("Cobrança não encontrada.");
+      const meRow = await loadAccountRow(ctx, ownerId);
+      if (sub.accountId !== ownerId && !(meRow && isAdminAccount(meRow))) {
+        throw new Error("Cobrança não encontrada nesta conta.");
+      }
+      if (sub.status === "aprovado") {
+        const acc = await loadAccountRow(ctx, sub.accountId);
+        return {
+          status: "aprovado",
+          detail: "Pagamento já confirmado: a assinatura está ativa.",
+          subExpiresAt: acc?.subExpiresAt ? acc.subExpiresAt.toISOString() : null,
+        };
+      }
+      const { settings: adminSettings } = await loadAdminSettings(ctx);
+      if (!sub.mpPaymentId || !adminSettings.mpAccessToken) {
+        return {
+          status: sub.status,
+          detail: "Ainda não foi possível consultar este pagamento. Tente de novo em alguns instantes.",
+          subExpiresAt: null,
+        };
+      }
+      const check = await mpGetPaymentStatus(adminSettings.mpAccessToken, sub.mpPaymentId);
+      if (!check.ok) {
+        return { status: sub.status, detail: check.detail, subExpiresAt: null };
+      }
+      if (check.status === "approved") {
+        const expiresAt = await applySubscriptionApproval(ctx, sub.accountId, sub.id);
+        ctx.invalidateQueries();
+        return {
+          status: "aprovado",
+          detail: "Pagamento confirmado: acesso liberado por 30 dias. Nenhum dado foi apagado.",
+          subExpiresAt: expiresAt.toISOString(),
+        };
+      }
+      if (check.status === "rejected" || check.status === "cancelled") {
+        await db
+          .update(schema.subscriptionPayments)
+          .set({ status: "recusado" })
+          .where(eq(schema.subscriptionPayments.id, sub.id));
+        return { status: "recusado", detail: "O Mercado Pago marcou este pagamento como recusado/cancelado.", subExpiresAt: null };
+      }
+      return {
+        status: sub.status,
+        detail: `O Mercado Pago ainda mostra este pagamento como “${check.status || "pendente"}”. Conclua o Pix e verifique de novo.`,
+        subExpiresAt: null,
+      };
+    },
+  }),
+
+  // "Esqueci a senha": sempre retorna ok, sem revelar se o e-mail
+  // existe. Se o envio de e-mail estiver configurado, o link chega
+  // no e-mail; se não, a tela orienta a falar com a administradora.
+  requestPasswordReset: defineAction({
+    request: z.object({ email: z.string().min(3).max(200) }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const email = args.email.trim().toLowerCase();
+      const rows = await db.select().from(schema.accounts);
+      const account = rows.find((a) => a.email.toLowerCase() === email);
+      if (account) {
+        try {
+          const { settings: adminSettings } = await loadAdminSettings(ctx);
+          if (adminSettings.resendApiKey && adminSettings.resendFrom) {
+            await db
+              .update(schema.passwordResets)
+              .set({ used: 1 })
+              .where(eq(schema.passwordResets.accountId, account.id));
+            const token = generateInvoiceToken();
+            await db.insert(schema.passwordResets).values({
+              accountId: account.id,
+              tokenHash: await sha256Hex(token),
+              expiresAt: new Date(Date.now() + 60 * 60 * 1000),
+              used: 0,
+            });
+            const link = resetLinkUrl(adminSettings.publicBaseUrl, token);
+            await sendResendEmail({
+              apiKey: adminSettings.resendApiKey,
+              from: adminSettings.resendFrom,
+              to: account.email,
+              subject: "Redefinir sua senha do Gestor IPTV",
+              text: `Você pediu para redefinir a senha do Gestor IPTV.\n\nAbra este link para criar uma senha nova (vale por 1 hora): ${link}\n\nSe não foi você, ignore este e-mail — sua senha atual continua valendo.`,
+              html: `<p>Você pediu para redefinir a senha do Gestor IPTV.</p><p><a href="${escapeHtml(link)}">Criar uma senha nova</a> (vale por 1 hora).</p><p>Se não foi você, ignore este e-mail — sua senha atual continua valendo.</p>`,
+            });
+          }
+        } catch {
+          // Falha de e-mail nunca revela nada nem quebra a resposta.
+        }
+      }
+      return { ok: true as const };
+    },
+  }),
+
+  resetPassword: defineAction({
+    request: z.object({
+      token: z.string().min(20).max(120),
+      newPassword: z.string().min(6).max(200),
+    }),
+    response: z.object({ ok: z.literal(true) }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const tokenHash = await sha256Hex(args.token.trim());
+      const rows = await db
+        .select()
+        .from(schema.passwordResets)
+        .where(eq(schema.passwordResets.tokenHash, tokenHash));
+      const reset = rows[0];
+      if (!reset || reset.used === 1 || reset.expiresAt.getTime() < Date.now()) {
+        throw new Error("Este link de redefinição não é mais válido. Peça um link novo na tela de login (Esqueci a senha).");
+      }
+      await db
+        .update(schema.passwordResets)
+        .set({ used: 1 })
+        .where(eq(schema.passwordResets.id, reset.id));
+      await db
+        .update(schema.accounts)
+        .set({ passHash: await hashPassword(args.newPassword) })
+        .where(eq(schema.accounts.id, reset.accountId));
+      // Sessões antigas desta conta deixam de valer: quem estava
+      // logado com a senha antiga entra de novo com a nova.
+      await db.delete(schema.sessions).where(eq(schema.sessions.accountId, reset.accountId));
+      ctx.invalidateQueries();
+      return { ok: true as const };
     },
   }),
 
