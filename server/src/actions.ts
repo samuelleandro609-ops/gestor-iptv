@@ -60,9 +60,9 @@ const TEMPLATE_VENCE_3_DIAS =
 const TEMPLATE_RENOVADA =
   "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.";
 const TEMPLATE_EXPIRADA =
-  "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
-const TEMPLATE_COBRANCA =
-  "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+  "Bom dia {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+const TEMPLATE_VENCE_AMANHA =
+  "Bom dia {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
 
 // Modelos antigos (padrão do sistema, com tudo numa frase só): contas
 // que nunca personalizaram o modelo passam a ver o modelo novo, no
@@ -79,9 +79,11 @@ const LEGACY_TEMPLATES: Record<string, string[]> = {
   expiredMessage: [
     "Olá, {nome}. Sua assinatura expirou em {vencimento} (há {dias_vencido} dias). Para voltar a assistir, abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
     "Olá, {nome}. Sua assinatura expirou em {vencimento}. Para voltar a assistir, renove pelo seu link de renovação e pague com Pix. Qualquer dúvida, é só chamar aqui.",
+    "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
   ],
   chargeMessage: [
     "Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
+    "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
   ],
 };
 
@@ -100,7 +102,7 @@ const DEFAULTS = {
   warnSoonMessage: TEMPLATE_VENCE_3_DIAS,
   renewedMessage: TEMPLATE_RENOVADA,
   expiredMessage: TEMPLATE_EXPIRADA,
-  chargeMessage: TEMPLATE_COBRANCA,
+  chargeMessage: TEMPLATE_VENCE_AMANHA,
   mpAccessToken: "",
   mpPublicKey: "",
   mpVerified: false,
@@ -148,7 +150,7 @@ async function loadSettings(ctx: Ctx, ownerId: number): Promise<SettingsObj> {
     chargeMessage: upgradeLegacyTemplate(
       row.chargeMessage ?? DEFAULTS.chargeMessage,
       LEGACY_TEMPLATES.chargeMessage ?? [],
-      TEMPLATE_COBRANCA,
+      TEMPLATE_VENCE_AMANHA,
     ),
     mpAccessToken: row.mpAccessToken,
     mpPublicKey: row.mpPublicKey,
