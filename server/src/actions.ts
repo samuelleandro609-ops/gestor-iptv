@@ -1,4 +1,5 @@
 import { z } from "zod";
+import QRCode from "qrcode";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
 import { asc, desc, eq, sql } from "drizzle-orm";
@@ -374,7 +375,20 @@ const sessionField = z.string().optional();
 // permanecem intactos e voltam ao pagar (30 dias por pagamento).
 
 const SUBSCRIPTION_DAYS = 30;
-const TRIAL_DAYS = 5;
+const TRIAL_DAYS = 7;
+
+// QR Code do Pix da assinatura: gerado no servidor a partir do código
+// Pix EXATO devolvido pelo Mercado Pago. Se a geração falhar, volta
+// null e o código copiável continua valendo — o pagamento nunca
+// quebra por causa do QR.
+async function pixQrDataUrl(pixCode: string | null): Promise<string | null> {
+  if (!pixCode) return null;
+  try {
+    return await QRCode.toDataURL(pixCode, { errorCorrectionLevel: "M", margin: 1, width: 280 });
+  } catch {
+    return null;
+  }
+}
 
 type AccountRow = typeof schema.accounts.$inferSelect;
 
@@ -4467,7 +4481,7 @@ export const Actions = {
           email,
           passHash,
           // A primeira conta do banco é a administradora (dona). Conta
-          // nova começa em teste grátis de 5 dias (subStatus 'trial').
+          // nova começa em teste grátis de 7 dias (subStatus 'trial').
           role: isFirstAccount ? "admin" : "user",
           trialEndsAt,
           subStatus: isFirstAccount ? "active" : "trial",
@@ -4822,6 +4836,7 @@ export const Actions = {
     response: z.object({
       id: z.number(),
       pixCode: z.string().nullable(),
+      qrDataUrl: z.string().nullable(),
       status: z.string(),
       detail: z.string(),
       amountCents: z.number(),
@@ -4879,8 +4894,9 @@ export const Actions = {
       return {
         id: subRow.id,
         pixCode: created.pixCode,
+        qrDataUrl: await pixQrDataUrl(created.pixCode),
         status: "pendente",
-        detail: "Pix da assinatura criado. Pague com o código Pix e toque em “Já paguei — verificar agora”. Ao confirmar, o acesso é liberado por 30 dias e nenhum dado é apagado.",
+        detail: "Pix da assinatura criado. Pague com o QR Code ou o código Pix e toque em “Já paguei — verificar agora”. Ao confirmar, o acesso é liberado por 30 dias e nenhum dado é apagado.",
         amountCents,
         mpPaymentId: created.mpPaymentId || null,
       };
