@@ -12,6 +12,50 @@ export const accounts = pgTable("accounts", {
   createdAt: timestamp("created_at", { mode: "date", precision: 3 })
     .notNull()
     .$defaultFn(() => new Date()),
+  // Papel e assinatura do gestor: a primeira conta do banco é a
+  // administradora (dona). Conta nova começa em teste grátis de 5
+  // dias (trialEndsAt); depois, sem assinatura paga, o acesso à
+  // interface bloqueia — SEM apagar nenhum dado (bloqueio é só de
+  // acesso; tudo permanece e volta ao pagar). subStatus 'blocked' é
+  // bloqueio manual pela administradora. A SENHA NUNCA APARECE EM
+  // NENHUMA RESPOSTA: aqui fica só o hash (passHash), e a área de
+  // Administração mostra e-mail, datas, status, valor e contagens —
+  // nunca senha nem hash.
+  role: text("role").notNull().default("user"),
+  trialEndsAt: timestamp("trial_ends_at", { mode: "date", precision: 3 }),
+  subExpiresAt: timestamp("sub_expires_at", { mode: "date", precision: 3 }),
+  subPriceCents: integer("sub_price_cents").notNull().default(0),
+  subStatus: text("sub_status").notNull().default("trial"),
+  lastLoginAt: timestamp("last_login_at", { mode: "date", precision: 3 }),
+});
+
+// Tokens de redefinição de senha: guarda só o HASH do token (sha256),
+// nunca o token. Uso único e validade curta (1 hora).
+export const passwordResets = pgTable("password_resets", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  accountId: integer("account_id").notNull(),
+  tokenHash: text("token_hash").notNull(),
+  expiresAt: timestamp("expires_at", { mode: "date", precision: 3 }).notNull(),
+  used: integer("used").notNull().default(0),
+  createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+    .notNull()
+    .$defaultFn(() => new Date()),
+});
+
+// Pagamentos da assinatura do gestor: cada pagamento aprovado libera
+// APENAS 30 dias de acesso. Não se confunde com a tabela payments
+// (cobranças Pix dos clientes IPTV de cada conta): aqui quem paga é
+// a conta que usa o gestor, com o Mercado Pago da administradora.
+export const subscriptionPayments = pgTable("subscription_payments", {
+  id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+  accountId: integer("account_id").notNull(),
+  mpPaymentId: text("mp_payment_id"),
+  amountCents: integer("amount_cents").notNull(),
+  status: text("status").notNull().default("pendente"),
+  createdAt: timestamp("created_at", { mode: "date", precision: 3 })
+    .notNull()
+    .$defaultFn(() => new Date()),
+  paidAt: timestamp("paid_at", { mode: "date", precision: 3 }),
 });
 
 // Sessões de login: guardam só o hash do token (o token em si fica no
@@ -384,4 +428,12 @@ export const settings = pgTable("settings", {
     .default(
       "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
+  // E-mail (Resend) e valor padrão da assinatura, configurados pela
+  // administradora. A chave do Resend fica só no banco e NUNCA volta
+  // nas respostas (a tela vê só se existe chave salva). O valor
+  // padrão é 0 (sem valor) até a administradora definir — nenhum
+  // valor é inventado aqui.
+  resendApiKey: text("resend_api_key").notNull().default(""),
+  resendFrom: text("resend_from").notNull().default(""),
+  defaultSubPriceCents: integer("default_sub_price_cents").notNull().default(0),
 });
