@@ -126,13 +126,15 @@ function withInvoiceLink(
 }
 
 // Modelo de aviso certo para os dias que faltam: vencido → expirado,
-// vence hoje → "vence hoje", ainda faltam dias → "vence em 3 dias".
+// vence hoje → "vence hoje", falta 1 dia → "vence amanhã", faltam
+// mais dias → "vence em 3 dias".
 function warnTemplateFor(
   left: number,
-  data: { warnMessage: string; warnSoonMessage: string; expiredMessage: string },
+  data: { warnMessage: string; warnSoonMessage: string; expiredMessage: string; chargeMessage: string },
 ): string {
   if (left < 0) return data.expiredMessage;
   if (left === 0) return data.warnMessage;
+  if (left === 1) return data.chargeMessage;
   return data.warnSoonMessage;
 }
 
@@ -1911,7 +1913,7 @@ function ClientsTab({
 
 /* -------- Enviar mensagem automática (WhatsApp conectado) -------- */
 
-type SendTemplateKey = "expirado" | "vence-hoje" | "vence-3-dias" | "cobranca";
+type SendTemplateKey = "expirado" | "vence-hoje" | "vence-3-dias" | "vence-amanha";
 
 // Modal do botão "Enviar mensagem" de cada cliente: mostra o nome e o
 // telefone do cliente, o "Enviar por" (Automático/Padrão ou o
@@ -1935,9 +1937,43 @@ function SendMessageModal({
       ? "expirado"
       : daysLeft(client.expiresAt) === 0
         ? "vence-hoje"
-        : "vence-3-dias",
+        : daysLeft(client.expiresAt) === 1
+          ? "vence-amanha"
+          : "vence-3-dias",
   );
   const [result, setResult] = useState<{ sent: boolean; detail: string } | null>(null);
+  // Edição do modelo aqui mesmo (lápis): vale para todos os clientes
+  // e fica salva na aba Mensagens também.
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [editText, setEditText] = useState("");
+  const [editSaved, setEditSaved] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const saveTemplate = useMutation({
+    mutationFn: () => {
+      const field: Record<SendTemplateKey, "expiredMessage" | "warnMessage" | "warnSoonMessage" | "chargeMessage"> = {
+        expirado: "expiredMessage",
+        "vence-hoje": "warnMessage",
+        "vence-3-dias": "warnSoonMessage",
+        "vence-amanha": "chargeMessage",
+      };
+      return api.saveMessageTemplates({
+        warnMessage: field[templateKey] === "warnMessage" ? editText.trim() : data.warnMessage,
+        warnSoonMessage: field[templateKey] === "warnSoonMessage" ? editText.trim() : data.warnSoonMessage,
+        renewedMessage: data.renewedMessage,
+        expiredMessage: field[templateKey] === "expiredMessage" ? editText.trim() : data.expiredMessage,
+        chargeMessage: field[templateKey] === "chargeMessage" ? editText.trim() : data.chargeMessage,
+      });
+    },
+    onSuccess: () => {
+      setEditSaved(true);
+      setEditing(false);
+      setEditError(null);
+      queryClient.invalidateQueries({ queryKey: ["state"] });
+    },
+    onError: (e) => setEditError(String(e)),
+  });
 
   const connected = data.qrWhatsappStatus === "conectado";
   const devicePhone = data.qrWhatsappPhone || "";
@@ -1947,7 +1983,7 @@ function SendMessageModal({
     { key: "expirado", label: "Acesso expirado", text: data.expiredMessage },
     { key: "vence-hoje", label: "Vence hoje", text: data.warnMessage },
     { key: "vence-3-dias", label: "Vence em 3 dias", text: data.warnSoonMessage },
-    { key: "cobranca", label: "Cobrança", text: data.chargeMessage },
+    { key: "vence-amanha", label: "Vence amanhã", text: data.chargeMessage },
   ];
   const selected = templates.find((t) => t.key === templateKey) ?? templates[0]!;
 
@@ -2034,7 +2070,22 @@ function SendMessageModal({
         </div>
 
         <div className="mt-4">
-          <label htmlFor="send-template" className={labelCls}>Template</label>
+          <div className="flex items-end justify-between gap-2">
+            <label htmlFor="send-template" className={labelCls}>Template</label>
+            <button
+              type="button"
+              className={btnGhost}
+              aria-label={`Editar modelo ${selected.label}`}
+              onClick={() => {
+                setEditText(selected.text);
+                setEditSaved(false);
+                setEditError(null);
+                setEditing(true);
+              }}
+            >
+              ✏️ Editar
+            </button>
+          </div>
           <select
             id="send-template"
             className={inputCls}
@@ -2042,6 +2093,8 @@ function SendMessageModal({
             onChange={(e) => {
               setTemplateKey(e.target.value as SendTemplateKey);
               setResult(null);
+              setEditing(false);
+              setEditSaved(false);
             }}
           >
             {templates.map((t) => (
@@ -2050,9 +2103,34 @@ function SendMessageModal({
               </option>
             ))}
           </select>
-          <p className="mt-1 text-xs text-[var(--dim)]">
-            Os textos são os modelos da aba Mensagens (Integrações → Mensagens), que você pode editar lá.
-          </p>
+          {editSaved && <p className="mt-1 text-sm font-semibold text-[var(--accent)]">Modelo salvo ✓ Vale para todos os clientes.</p>}
+          {editing && (
+            <div className="mt-2 space-y-2">
+              <label htmlFor="send-template-edit" className={labelCls}>Editar modelo — {selected.label}</label>
+              <textarea
+                id="send-template-edit"
+                className={inputCls}
+                rows={5}
+                value={editText}
+                onChange={(e) => setEditText(e.target.value)}
+              />
+              <p className="text-xs text-[var(--dim)]">Use {"{nome}"}, {"{vencimento}"}, {"{plano}"}, {"{valor}"} e {"{link}"} — eles viram os dados deste cliente na hora do envio.</p>
+              {editError && <p className="text-sm text-[var(--danger)]">{editError}</p>}
+              <div className="flex flex-wrap gap-2">
+                <button type="button" className={btnPrimary} disabled={saveTemplate.isPending || !editText.trim()} onClick={() => saveTemplate.mutate()}>
+                  {saveTemplate.isPending ? "Salvando…" : "Salvar modelo"}
+                </button>
+                <button type="button" className={btnGhost} onClick={() => setEditing(false)}>
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+          {!editing && (
+            <p className="mt-1 text-xs text-[var(--dim)]">
+              Toque no lápis para editar este modelo aqui mesmo; ele também fica salvo na aba Mensagens.
+            </p>
+          )}
         </div>
 
         <div className="mt-4">
@@ -4682,7 +4760,7 @@ function MessagesTab({ data }: { data: State }) {
           <textarea id="msg-expired" className={inputCls} rows={4} value={expiredMessage} onChange={(e) => setExpiredMessage(e.target.value)} required />
         </div>
         <div>
-          <label htmlFor="msg-charge" className={labelCls}>Cobrança</label>
+          <label htmlFor="msg-charge" className={labelCls}>Aviso de vencimento — vence amanhã</label>
           <textarea id="msg-charge" className={inputCls} rows={4} value={chargeMessage} onChange={(e) => setChargeMessage(e.target.value)} required />
         </div>
         {error && <p className="text-sm text-[var(--danger)]">{error}</p>}
