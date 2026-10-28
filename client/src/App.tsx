@@ -187,6 +187,10 @@ export function App() {
   if (invoiceMatch) {
     return <InvoiceLoader token={invoiceMatch[1]!} />;
   }
+  const resetMatch = hash.match(/^#\/redefinir-senha\?token=([A-Za-z0-9]+)$/);
+  if (resetMatch) {
+    return <ResetPasswordScreen token={resetMatch[1]!} />;
+  }
   return <AuthGate />;
 }
 
@@ -299,17 +303,23 @@ function AuthScreen({
   onLoggedIn: (token: string) => void;
   notice?: string | null;
 }) {
-  const [mode, setMode] = useState<"entrar" | "criar">("entrar");
+  const [mode, setMode] = useState<"entrar" | "criar" | "esqueci">("entrar");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [resetSent, setResetSent] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setError(null);
     setPending(true);
     try {
+      if (mode === "esqueci") {
+        await api.requestPasswordReset({ email: email.trim() });
+        setResetSent(true);
+        return;
+      }
       const result =
         mode === "criar"
           ? await api.register({ email: email.trim(), password })
@@ -349,12 +359,29 @@ function AuthScreen({
             Criar conta
           </button>
         </div>
-        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-label={mode === "criar" ? "Criar conta" : "Entrar"}>
+        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-label={mode === "criar" ? "Criar conta" : mode === "esqueci" ? "Esqueci a senha" : "Entrar"}>
           {notice && !error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
               {notice}
             </p>
           )}
+          {mode === "esqueci" && resetSent ? (
+            <div className="space-y-3">
+              <p className="text-sm leading-relaxed">
+                Se o e-mail estiver cadastrado e o envio de e-mail estiver configurado, o link
+                para criar uma senha nova chegou no seu e-mail (vale por 1 hora). Se não chegar,
+                fale com quem administra o gestor para gerar um link para você.
+              </p>
+              <button
+                type="button"
+                className="w-full rounded-lg border border-[var(--border)] px-4 py-3 font-semibold"
+                onClick={() => { setMode("entrar"); setResetSent(false); setError(null); }}
+              >
+                Voltar para entrar
+              </button>
+            </div>
+          ) : (
+            <>
           <div>
             <label htmlFor="auth-email" className={labelCls}>E-mail</label>
             <input
@@ -368,6 +395,7 @@ function AuthScreen({
               placeholder="voce@email.com"
             />
           </div>
+          {mode !== "esqueci" && (
           <div>
             <label htmlFor="auth-pass" className={labelCls}>Senha</label>
             <input
@@ -382,19 +410,141 @@ function AuthScreen({
               placeholder={mode === "criar" ? "Mínimo de 6 caracteres" : "Sua senha"}
             />
           </div>
+          )}
           {error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
               {error}
             </p>
           )}
           <button type="submit" className="w-full rounded-lg bg-[var(--accent)] px-4 py-3 font-display text-base font-bold text-[var(--accent-ink)] disabled:opacity-50" disabled={pending}>
-            {pending ? "Aguarde…" : mode === "criar" ? "Criar minha conta" : "Entrar"}
+            {pending ? "Aguarde…" : mode === "criar" ? "Criar minha conta" : mode === "esqueci" ? "Enviar link de redefinição" : "Entrar"}
           </button>
+          {mode === "entrar" && (
+            <button
+              type="button"
+              className="w-full text-center text-sm font-semibold text-[var(--accent-bright)]"
+              onClick={() => { setMode("esqueci"); setError(null); }}
+            >
+              Esqueci a senha
+            </button>
+          )}
+          {mode === "esqueci" && (
+            <button
+              type="button"
+              className="w-full text-center text-sm font-semibold text-[var(--accent-bright)]"
+              onClick={() => { setMode("entrar"); setError(null); }}
+            >
+              Voltar para entrar
+            </button>
+          )}
           <p className="text-center text-xs text-[var(--dim)]">
             {mode === "criar"
-              ? "Ao criar a conta, você entra direto e já pode cadastrar seus servidores, planos e clientes — tudo separado das outras contas."
-              : "Esqueceu a senha? Fale com quem administra o gestor para redefinir o acesso."}
+              ? "Ao criar a conta, você entra direto e já pode cadastrar seus servidores, planos e clientes — tudo separado das outras contas. Você ganha 5 dias de teste grátis."
+              : mode === "esqueci"
+                ? "O link vale por 1 hora. Se o envio de e-mail não estiver configurado, fale com quem administra o gestor."
+                : "Cada conta tem os seus próprios clientes, servidores, planos e WhatsApp."}
           </p>
+            </>
+          )}
+        </form>
+      </main>
+    </div>
+  );
+}
+
+/* ---------------- Redefinir senha (link do e-mail / da administradora) ---------------- */
+
+function ResetPasswordScreen({ token }: { token: string }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [pending, setPending] = useState(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (password.length < 6) {
+      setError("A senha nova precisa ter no mínimo 6 caracteres.");
+      return;
+    }
+    if (password !== confirm) {
+      setError("As senhas não são iguais. Confira e tente de novo.");
+      return;
+    }
+    setPending(true);
+    try {
+      await api.resetPassword({ token, newPassword: password });
+      setDone(true);
+    } catch (err) {
+      setError(friendlyAuthError(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--text)]">
+      <SafeAreaTopScrim backgroundColor="var(--bg)" />
+      <main className="w-full max-w-md">
+        <h1 className="text-center font-display text-3xl font-extrabold">Criar senha nova</h1>
+        <p className="mt-2 text-center text-sm text-[var(--dim)]">
+          Este link vale por 1 hora e só pode ser usado uma vez.
+        </p>
+        <form onSubmit={submit} className="mt-6 space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-label="Criar senha nova">
+          {done ? (
+            <div className="space-y-3">
+              <p className="text-sm leading-relaxed">
+                Senha alterada. Entre de novo com seu e-mail e a senha nova.
+              </p>
+              <button
+                type="button"
+                className="w-full rounded-lg bg-[var(--accent)] px-4 py-3 font-display text-base font-bold text-[var(--accent-ink)]"
+                onClick={() => { window.location.hash = ""; window.location.reload(); }}
+              >
+                Voltar para entrar
+              </button>
+            </div>
+          ) : (
+            <>
+              <div>
+                <label htmlFor="reset-pass" className={labelCls}>Senha nova</label>
+                <input
+                  id="reset-pass"
+                  type="password"
+                  className={inputCls}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  placeholder="Mínimo de 6 caracteres"
+                />
+              </div>
+              <div>
+                <label htmlFor="reset-pass2" className={labelCls}>Repita a senha nova</label>
+                <input
+                  id="reset-pass2"
+                  type="password"
+                  className={inputCls}
+                  value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  placeholder="Repita a senha nova"
+                />
+              </div>
+              {error && (
+                <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
+                  {error}
+                </p>
+              )}
+              <button type="submit" className="w-full rounded-lg bg-[var(--accent)] px-4 py-3 font-display text-base font-bold text-[var(--accent-ink)] disabled:opacity-50" disabled={pending}>
+                {pending ? "Aguarde…" : "Salvar senha nova"}
+              </button>
+            </>
+          )}
         </form>
       </main>
     </div>
@@ -774,7 +924,8 @@ type Tab =
   | "planos"
   | "cupons"
   | "indicacao"
-  | "suporte";
+  | "suporte"
+  | "administracao";
 
 type ClientFilter = "todos" | "ativos" | "vencidos" | "pausados" | "testes";
 
@@ -890,6 +1041,13 @@ function MenuIcon({ tab }: { tab: Tab }) {
           <path d="M12 16.8h.01" />
         </svg>
       );
+    case "administracao":
+      return (
+        <svg {...common}>
+          <path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" />
+          <path d="M9.5 12l2 2 3.5-4" />
+        </svg>
+      );
   }
 }
 
@@ -915,6 +1073,14 @@ function Manager({
     return <div className="min-h-screen bg-[var(--bg)] p-6 text-[var(--text)]">Erro ao carregar: {String(error)}</div>;
   }
 
+  // Conta bloqueada (teste acabou e sem assinatura, ou bloqueio
+  // manual): mostra SÓ a tela de renovação, no lugar do gestor. Nada
+  // foi apagado — ao pagar, tudo volta. A administradora nunca cai
+  // aqui.
+  if (data.access.blocked && !data.isAdmin) {
+    return <BlockedScreen data={data} onLogout={onLogout} />;
+  }
+
   const expiringSoon = data.clients.filter((c) => {
     const left = daysLeft(c.expiresAt);
     return data.warnDays.some((d) => left === d) || left < 0;
@@ -935,6 +1101,7 @@ function Manager({
     { id: "cupons", label: "Cupons" },
     { id: "indicacao", label: "Indicação de Clientes" },
     { id: "suporte", label: "Suporte" },
+    ...(data.isAdmin ? [{ id: "administracao" as Tab, label: "Administração" }] : []),
   ];
 
   function showClients(filter: ClientFilter, search = "") {
@@ -997,6 +1164,20 @@ function Manager({
         <div className="border-t border-[var(--border)] px-5 py-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">Sua conta</p>
           <p className="mt-0.5 break-all text-sm font-medium">{data.accountEmail}</p>
+          {!data.isAdmin && data.access.trialEndsAt && !data.access.subExpiresAt && (
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              Teste grátis até {fmtDate(data.access.trialEndsAt)}
+              {data.access.daysLeft > 0 ? ` (${data.access.daysLeft} dia${data.access.daysLeft === 1 ? "" : "s"} restantes)` : ""}
+            </p>
+          )}
+          {!data.isAdmin && data.access.subExpiresAt && (
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              Assinatura até {fmtDate(data.access.subExpiresAt)}
+            </p>
+          )}
+          {data.isAdmin && (
+            <p className="mt-1 text-sm text-[var(--dim)]">Conta administradora</p>
+          )}
           <button
             type="button"
             onClick={onLogout}
@@ -1036,6 +1217,7 @@ function Manager({
         {tab === "cupons" && <CouponsTab data={data} />}
         {tab === "indicacao" && <ReferralsTab data={data} onShowClients={showClients} />}
         {tab === "suporte" && <SupportTab data={data} onNavigate={setTab} />}
+        {tab === "administracao" && data.isAdmin && <AdminTab data={data} />}
       </main>
     </div>
   );
@@ -6663,6 +6845,372 @@ function HostingSection({ data }: { data: State }) {
 }
 
 /* ---------------- Suporte ---------------- */
+
+/* ---------------- Conta bloqueada (teste acabou / sem assinatura) ---------------- */
+// Só aparece no lugar do gestor: nenhum dado foi apagado. Ao pagar o
+// Pix e confirmar, o acesso volta por 30 dias e tudo reaparece.
+
+function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }) {
+  const queryClient = useQueryClient();
+  const [subPix, setSubPix] = useState<{ id: number; pixCode: string | null; amountCents: number } | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const createPix = useMutation({
+    mutationFn: () => api.createSubscriptionPix({}),
+    onSuccess: (res) => {
+      setSubPix({ id: res.id, pixCode: res.pixCode, amountCents: res.amountCents });
+      setMessage(res.detail);
+    },
+    onError: (e) => setMessage(friendlyAuthError(e)),
+  });
+  const checkPix = useMutation({
+    mutationFn: () => api.checkSubscriptionPaymentStatus({ subscriptionPaymentId: subPix!.id }),
+    onSuccess: (res) => {
+      setMessage(res.detail);
+      if (res.status === "aprovado") {
+        queryClient.invalidateQueries({ queryKey: ["state"] });
+      }
+    },
+    onError: (e) => setMessage(friendlyAuthError(e)),
+  });
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--text)]">
+      <SafeAreaTopScrim backgroundColor="var(--bg)" />
+      <main className="w-full max-w-md space-y-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-6 text-center">
+        <h1 className="font-display text-2xl font-extrabold">Seu teste grátis acabou</h1>
+        <p className="text-sm leading-relaxed text-[var(--dim)]">
+          Para continuar usando o gestor, renove a assinatura.{" "}
+          <strong className="text-[var(--text)]">Nada foi apagado:</strong> seus clientes,
+          servidores, planos e cobranças continuam todos salvos e voltam assim que o pagamento
+          for confirmado.
+        </p>
+        {data.access.priceCents > 0 ? (
+          <p className="font-display text-3xl font-extrabold">{brl(data.access.priceCents)} <span className="text-base font-medium text-[var(--dim)]">por 30 dias</span></p>
+        ) : (
+          <p className="text-sm text-[var(--dim)]">
+            O valor da assinatura ainda não foi definido pela administradora. Fale com ela para
+            definir o valor e liberar o pagamento.
+          </p>
+        )}
+        {!subPix ? (
+          <button
+            type="button"
+            className={btnPrimary + " w-full py-3"}
+            disabled={createPix.isPending || data.access.priceCents <= 0}
+            onClick={() => { setMessage(null); createPix.mutate(); }}
+          >
+            {createPix.isPending ? "Gerando Pix…" : "Gerar Pix"}
+          </button>
+        ) : (
+          <div className="space-y-3 text-left">
+            <p className="text-sm">
+              Valor: <strong>{brl(subPix.amountCents)}</strong> — pague com o código Pix abaixo
+              (vale por 30 dias de acesso).
+            </p>
+            {subPix.pixCode ? (
+              <>
+                <p className="break-all rounded-lg bg-[var(--surface2)] p-3 font-mono text-xs">{subPix.pixCode}</p>
+                <button
+                  type="button"
+                  className={btnGhost + " w-full"}
+                  onClick={async () => { setCopied(await copyText(subPix.pixCode!)); }}
+                >
+                  {copied ? "Chave Pix copiada ✓" : "Copiar chave Pix"}
+                </button>
+              </>
+            ) : (
+              <p className="text-sm text-[var(--dim)]">A chave Pix não veio nesta cobrança. Gere de novo.</p>
+            )}
+            <button
+              type="button"
+              className={btnPrimary + " w-full py-3"}
+              disabled={checkPix.isPending}
+              onClick={() => { setMessage(null); checkPix.mutate(); }}
+            >
+              {checkPix.isPending ? "Verificando…" : "Já paguei — verificar agora"}
+            </button>
+          </div>
+        )}
+        {message && (
+          <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{message}</p>
+        )}
+        <p className="text-sm text-[var(--dim)]">Conta: {data.accountEmail}</p>
+        <button type="button" className={btnGhost + " w-full"} onClick={onLogout}>
+          Sair
+        </button>
+      </main>
+    </div>
+  );
+}
+
+/* ---------------- Administração (só a administradora vê) ---------------- */
+// Contas registradas, valores, liberação/bloqueio, link de redefinição
+// de senha e configurações de e-mail/valor padrão. SENHAS NUNCA SÃO
+// EXIBIDAS AQUI: a tela mostra só e-mail, datas, status, valor e
+// contagens — a senha fica guardada só como hash, sem volta.
+
+type TenantRow = ApiResponse<typeof api, "listTenantAccounts">["tenants"][number];
+
+function AdminTab({ data }: { data: State }) {
+  const queryClient = useQueryClient();
+  const tenantsQuery = useQuery({
+    queryKey: ["tenants"],
+    queryFn: () => api.listTenantAccounts({}),
+  });
+  const tenants = tenantsQuery.data?.tenants ?? data.tenants;
+  const adminSettings = data.adminSettings;
+
+  const [priceById, setPriceById] = useState<Record<number, string>>({});
+  const [daysById, setDaysById] = useState<Record<number, string>>({});
+  const [resetLinks, setResetLinks] = useState<Record<number, string>>({});
+  const [notice, setNotice] = useState<string | null>(null);
+  const [copiedLink, setCopiedLink] = useState<number | null>(null);
+
+  const [defaultPrice, setDefaultPrice] = useState(() =>
+    adminSettings ? String(adminSettings.defaultSubPriceCents / 100).replace(".", ",") : "",
+  );
+  const [resendFrom, setResendFrom] = useState(adminSettings?.resendFrom ?? "");
+  const [resendKey, setResendKey] = useState("");
+  const [emailMsg, setEmailMsg] = useState<string | null>(null);
+
+  function refresh() {
+    queryClient.invalidateQueries({ queryKey: ["tenants"] });
+    queryClient.invalidateQueries({ queryKey: ["state"] });
+  }
+
+  const setPrice = useMutation({
+    mutationFn: (args: { accountId: number; priceCents: number }) => api.setTenantPrice(args),
+    onSuccess: () => { setNotice("Valor salvo."); refresh(); },
+    onError: (e) => setNotice(friendlyAuthError(e)),
+  });
+  const grant = useMutation({
+    mutationFn: (args: { accountId: number; days: number }) => api.grantTenantAccess(args),
+    onSuccess: () => { setNotice("Acesso liberado."); refresh(); },
+    onError: (e) => setNotice(friendlyAuthError(e)),
+  });
+  const block = useMutation({
+    mutationFn: (args: { accountId: number; blocked: boolean }) => api.setTenantBlocked(args),
+    onSuccess: (_r, args) => { setNotice(args.blocked ? "Conta bloqueada. Nada foi apagado." : "Conta desbloqueada."); refresh(); },
+    onError: (e) => setNotice(friendlyAuthError(e)),
+  });
+  const resetLink = useMutation({
+    mutationFn: (accountId: number) => api.adminResetLink({ accountId }),
+    onSuccess: (res, accountId) => {
+      setResetLinks((prev) => ({ ...prev, [accountId]: res.link }));
+      setNotice("Link de redefinição gerado (vale 1 hora). Envie para a conta.");
+    },
+    onError: (e) => setNotice(friendlyAuthError(e)),
+  });
+  const saveEmail = useMutation({
+    mutationFn: () =>
+      api.adminEmailSettings({
+        resendApiKey: resendKey,
+        resendFrom: resendFrom.trim(),
+        defaultSubPriceCents: parseBRL(defaultPrice) ?? 0,
+      }),
+    onSuccess: (res) => {
+      setEmailMsg(
+        `Configurações salvas. Valor padrão: ${brl(parseBRL(defaultPrice) ?? 0)}. Chave de e-mail: ${res.hasResendKey ? "salva" : "não configurada"}.`,
+      );
+      setResendKey("");
+      refresh();
+    },
+    onError: (e) => setEmailMsg(friendlyAuthError(e)),
+  });
+  const testEmail = useMutation({
+    mutationFn: () => api.testEmailSend({}),
+    onSuccess: (res) => setEmailMsg(res.detail),
+    onError: (e) => setEmailMsg(friendlyAuthError(e)),
+  });
+
+  return (
+    <section aria-label="Administração" className="mt-5 space-y-5 lg:mt-8">
+      <div>
+        <h2 className="font-display text-2xl font-extrabold">Administração</h2>
+        <p className="mt-1 text-sm text-[var(--dim)]">
+          Quem se registrou, o valor da assinatura de cada conta e o acesso de cada uma. As senhas
+          nunca aparecem aqui — ficam guardadas só como código (hash), sem volta. Bloquear uma
+          conta não apaga nada: os dados dela permanecem e voltam ao pagar.
+        </p>
+      </div>
+      {notice && (
+        <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{notice}</p>
+      )}
+
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <h3 className="font-display text-lg font-bold">Contas registradas ({tenants.length})</h3>
+        {tenantsQuery.isPending ? (
+          <p className="mt-2 text-sm text-[var(--dim)]">Carregando contas…</p>
+        ) : tenants.length === 0 ? (
+          <p className="mt-2 text-sm text-[var(--dim)]">Nenhuma conta registrada ainda.</p>
+        ) : (
+          <ul className="mt-3 space-y-3">
+            {tenants.map((t: TenantRow) => {
+              const isAdminRow = t.role === "admin";
+              const blocked = t.subStatus === "blocked";
+              return (
+                <li key={t.id} className="rounded-xl border border-[var(--border)] p-3">
+                  <p className="break-all font-semibold">{t.email}</p>
+                  <p className="mt-0.5 text-sm text-[var(--dim)]">
+                    {isAdminRow ? "Administradora" : "Conta"} • Criada em {fmtDate(t.createdAt)}
+                    {t.lastLoginAt ? ` • Último acesso em ${fmtDate(t.lastLoginAt)}` : " • Nunca entrou"}
+                  </p>
+                  <p className="mt-0.5 text-sm text-[var(--dim)]">
+                    Teste até {t.trialEndsAt ? fmtDate(t.trialEndsAt) : "—"} • Assinatura até{" "}
+                    {t.subExpiresAt ? fmtDate(t.subExpiresAt) : "—"} • Status:{" "}
+                    {blocked ? "bloqueada" : t.subStatus === "active" ? "ativa" : "em teste"} •{" "}
+                    {t.clientCount} cliente(s) • {t.serverCount} servidor(es) • {t.planCount} plano(s)
+                  </p>
+                  {!isAdminRow && (
+                    <div className="mt-3 space-y-2">
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div>
+                          <label className={labelCls} htmlFor={`price-${t.id}`}>Valor da assinatura (30 dias)</label>
+                          <input
+                            id={`price-${t.id}`}
+                            className={inputCls}
+                            value={priceById[t.id] ?? String(t.subPriceCents / 100).replace(".", ",")}
+                            onChange={(e) => setPriceById((p) => ({ ...p, [t.id]: e.target.value }))}
+                            placeholder="0,00 = usa o valor padrão"
+                            inputMode="decimal"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          disabled={setPrice.isPending}
+                          onClick={() => {
+                            const cents = parseBRL(priceById[t.id] ?? String(t.subPriceCents / 100).replace(".", ","));
+                            if (cents == null) { setNotice("Valor inválido. Use o formato 30,00."); return; }
+                            setPrice.mutate({ accountId: t.id, priceCents: cents });
+                          }}
+                        >
+                          Salvar valor
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-end gap-2">
+                        <div>
+                          <label className={labelCls} htmlFor={`days-${t.id}`}>Liberar acesso (dias)</label>
+                          <input
+                            id={`days-${t.id}`}
+                            className={inputCls}
+                            value={daysById[t.id] ?? "30"}
+                            onChange={(e) => setDaysById((p) => ({ ...p, [t.id]: e.target.value }))}
+                            inputMode="numeric"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          disabled={grant.isPending}
+                          onClick={() => {
+                            const days = Number(daysById[t.id] ?? "30");
+                            if (!Number.isInteger(days) || days < 1) { setNotice("Dias inválidos."); return; }
+                            grant.mutate({ accountId: t.id, days });
+                          }}
+                        >
+                          Liberar
+                        </button>
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          disabled={block.isPending}
+                          onClick={() => block.mutate({ accountId: t.id, blocked: !blocked })}
+                        >
+                          {blocked ? "Desbloquear" : "Bloquear"}
+                        </button>
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          disabled={resetLink.isPending}
+                          onClick={() => resetLink.mutate(t.id)}
+                        >
+                          Gerar link de redefinição de senha
+                        </button>
+                      </div>
+                      {resetLinks[t.id] && (
+                        <div className="space-y-1">
+                          <p className="break-all rounded-lg bg-[var(--surface2)] p-2 font-mono text-xs">{resetLinks[t.id]}</p>
+                          <button
+                            type="button"
+                            className={btnGhost}
+                            onClick={async () => { await copyText(resetLinks[t.id]!); setCopiedLink(t.id); }}
+                          >
+                            {copiedLink === t.id ? "Link copiado ✓" : "Copiar link"}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <h3 className="font-display text-lg font-bold">Valor padrão e envio de e-mail</h3>
+        <p className="mt-1 text-sm text-[var(--dim)]">
+          O valor padrão vale para as contas sem valor próprio. O e-mail envia as boas-vindas e
+          os links de redefinição de senha. A chave nunca é exibida — em branco, mantém a salva.
+        </p>
+        <div className="mt-3 space-y-3">
+          <div>
+            <label className={labelCls} htmlFor="admin-default-price">Valor padrão da assinatura (30 dias)</label>
+            <input
+              id="admin-default-price"
+              className={inputCls}
+              value={defaultPrice}
+              onChange={(e) => setDefaultPrice(e.target.value)}
+              placeholder="0,00 = sem valor definido"
+              inputMode="decimal"
+            />
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="admin-resend-from">Remetente do e-mail</label>
+            <input
+              id="admin-resend-from"
+              className={inputCls}
+              value={resendFrom}
+              onChange={(e) => setResendFrom(e.target.value)}
+              placeholder="Gestor IPTV <contato@seudominio.com>"
+              autoComplete="off"
+            />
+          </div>
+          <div>
+            <label className={labelCls} htmlFor="admin-resend-key">Chave do Resend (API key)</label>
+            <input
+              id="admin-resend-key"
+              type="password"
+              className={inputCls}
+              value={resendKey}
+              onChange={(e) => setResendKey(e.target.value)}
+              placeholder={adminSettings?.hasResendKey ? "Chave salva — preencha só para trocar" : "Cole a chave do Resend"}
+              autoComplete="off"
+            />
+            <p className="mt-1 text-sm text-[var(--dim)]">
+              Chave de e-mail: {adminSettings?.hasResendKey ? "salva" : "não configurada"}.
+            </p>
+          </div>
+          {emailMsg && (
+            <p className="rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{emailMsg}</p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className={btnPrimary} disabled={saveEmail.isPending} onClick={() => { setEmailMsg(null); saveEmail.mutate(); }}>
+              {saveEmail.isPending ? "Salvando…" : "Salvar configurações"}
+            </button>
+            <button type="button" className={btnGhost} disabled={testEmail.isPending} onClick={() => { setEmailMsg(null); testEmail.mutate(); }}>
+              {testEmail.isPending ? "Enviando…" : "Testar envio de e-mail"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 function SupportTab({
   data,
