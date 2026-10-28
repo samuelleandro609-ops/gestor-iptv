@@ -3541,7 +3541,7 @@ function ServerModal({
                   {integrationMode === "propria" && (
                     <div className="space-y-3 border-t border-[var(--border)] pt-3">
                       <p className="text-sm text-[var(--dim)]">
-                        Opcional: se o seu painel tiver uma API própria com token, configure aqui. Sem isso, a renovação tenta a chamada de extensão pelo link do painel; se a API responder erro (ex.: HTTP 400), a renovação fica pendente com o motivo e nenhum crédito é consumido.
+                        Opcional: a API deste painel pede usuário e senha do painel (campos username e password) para emitir o token — o teste de conexão envia os que já estão salvos neste servidor e guarda o token emitido, sem exibir. Se o seu painel tiver um token estático próprio, cole-o abaixo. Sem autenticação da API, a renovação fica pendente com o motivo e nenhum crédito é consumido.
                       </p>
                       <div>
                         <label htmlFor="s-api-base" className={labelCls}>Base da API do painel (opcional)</label>
