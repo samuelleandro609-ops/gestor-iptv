@@ -426,7 +426,10 @@ function InvoiceLoader({ token }: { token: string }) {
 
 function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken: string }) {
   const queryClient = useQueryClient();
-  const theme = INVOICE_THEMES[invoice.invoiceColor] ?? INVOICE_THEMES.verde!;
+  // Fatura sem verde: a pedido da Emily, a página do cliente usa
+  // paleta neutra escura, sem a cor do tema salvo (verde), para a
+  // imagem de fundo aparecer sem tingimento verde.
+  const theme = { main: "#111827", dark: "#0b0f17", soft: "#f3f4f6" };
   const [pix, setPix] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
@@ -498,7 +501,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
         />
         <div
           className="absolute inset-0"
-          style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)`, opacity: 0.68 }}
+          style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)`, opacity: 0.52 }}
         />
       </div>
       <SafeAreaTopScrim backgroundColor={theme.dark} />
