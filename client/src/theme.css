@@ -1,0 +1,65 @@
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&display=swap');
+@import "tailwindcss";
+@import "tailwindcss-safe-area";
+
+@theme {
+  --text-xs: 12px;
+  --text-xs--line-height: 16px;
+  --text-sm: 14px;
+  --text-sm--line-height: 20px;
+  --text-base: 16px;
+  --text-base--line-height: 24px;
+  --text-lg: 18px;
+  --text-lg--line-height: 28px;
+  --text-xl: 20px;
+  --text-xl--line-height: 28px;
+  --text-2xl: 24px;
+  --text-2xl--line-height: 32px;
+  --font-display: "Sora", system-ui, sans-serif;
+}
+
+/* Tema único do gestor: azul-marinho escuro em todas as telas, com
+   ciano brilhante nas ações principais — a pedido da dona do gestor,
+   o mesmo visual vale no claro e no escuro do aparelho. */
+:root {
+  color-scheme: dark;
+  --bg: #050d1d;
+  --surface: #0a1a33;
+  --surface2: #0f2547;
+  --text: #eaf3fc;
+  --dim: #93a9c4;
+  --border: #1e3a5c;
+  --accent: #2dd4ee;
+  --accent-strong: #67e8f9;
+  --accent-bright: #38e1f8;
+  --accent-soft: rgba(45, 212, 238, 0.14);
+  --accent-ink: #03222e;
+  --warn: #f5b544;
+  --warn-bg: rgba(245, 181, 68, 0.12);
+  --danger: #ff7a85;
+  --danger-bg: rgba(255, 107, 116, 0.12);
+  --ok-bg: rgba(45, 212, 140, 0.12);
+  --card-green: #34d399;
+  --card-green-bg: rgba(52, 211, 153, 0.1);
+  --card-red: #ff7a85;
+  --card-red-bg: rgba(255, 122, 133, 0.1);
+  --card-blue: #38bdf8;
+  --card-blue-bg: rgba(56, 189, 248, 0.1);
+  --card-slate: #9fb4cc;
+  --card-slate-bg: rgba(159, 180, 204, 0.08);
+  --radius: 14px;
+  --space-surface: var(--surface);
+  --space-surface-alt: var(--surface2);
+  --space-muted: var(--dim);
+  --space-border: var(--border);
+  --space-accent: var(--accent);
+}
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+}
+
+h1, h2, h3, .font-display {
+  font-family: var(--font-display);
+}
