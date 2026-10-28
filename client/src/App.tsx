@@ -3145,7 +3145,9 @@ function ServersTab({ data }: { data: State }) {
 
               <div className="mt-3 rounded-xl bg-[var(--surface2)] p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-bold">API do painel — teste e extensão</p>
+                  <p className="text-sm font-bold">
+                    Renovação automática: {s.apiVerified ? "pronta" : "pendente"}
+                  </p>
                   <button
                     type="button"
                     className={btnGhost}
@@ -3153,16 +3155,19 @@ function ServersTab({ data }: { data: State }) {
                     onClick={() => testApi.mutate(s.id)}
                     aria-label={`Testar conexão da API do painel de ${s.name}`}
                   >
-                    {testApi.isPending ? "Testando variações…" : "Testar conexão"}
+                    {testApi.isPending ? "Testando…" : "Testar conexão"}
                   </button>
                 </div>
-                <p className="mt-1 break-all font-mono text-sm">base da API: {s.apiBase || "não cadastrada"}</p>
-                <p className="text-sm text-[var(--dim)]">
-                  token da API: {s.hasApiToken ? "salvo no gestor (não exibido)" : "não salvo"}
-                  {s.apiStatusDetail ? ` — ${s.apiStatusDetail}` : ""}
-                </p>
+                {s.apiStatusDetail && (
+                  <p className="mt-1 text-sm text-[var(--dim)]">{s.apiStatusDetail}</p>
+                )}
                 {testErrors[s.id] && <p className="mt-1 text-sm font-medium text-[var(--danger)]">{testErrors[s.id]}</p>}
-                <PanelDiagnosticView diagnostic={testResults[s.id]?.diagnostic ?? s.apiDiagnostic} />
+                {!s.apiVerified && (testResults[s.id]?.diagnostic ?? s.apiDiagnostic) && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-sm font-semibold">Ver o que deu errado</summary>
+                    <PanelDiagnosticView diagnostic={testResults[s.id]?.diagnostic ?? s.apiDiagnostic} />
+                  </details>
+                )}
                 <div className="mt-3 border-t border-[var(--border)] pt-3">
                   <p className="text-sm font-bold">
                     Teste de extensão real ([+] Estender) — {s.extendVerified ? "verificado" : "pendente"}
@@ -3182,7 +3187,7 @@ function ServersTab({ data }: { data: State }) {
                       >
                         <option value="">Selecione um cliente…</option>
                         {data.clients
-                          .filter((c) => c.planId != null && (c.serverId == null || c.serverId === s.id))
+                          .filter((c) => c.listState === "normal" && c.planId != null && (c.serverId == null || c.serverId === s.id))
                           .map((c) => (
                             <option key={c.id} value={c.id}>
                               {c.name} ({c.iptvUser}) — {c.planName} — {c.planDays} dias = {c.planCredits} crédito(s)
@@ -3281,9 +3286,6 @@ function ServerModal({
   );
   const [autoRenewEnabled, setAutoRenewEnabled] = useState(initial?.autoRenewEnabled ?? true);
   const [sendVia, setSendVia] = useState(initial?.sendVia ?? "padrao");
-  const [apiBase, setApiBase] = useState(initial?.apiBase ?? "");
-  const [apiToken, setApiToken] = useState("");
-  const [clearApiToken, setClearApiToken] = useState(false);
   const [extendPath, setExtendPath] = useState(initial?.extendPath ?? "/users/extend");
   const [extendMethod, setExtendMethod] = useState(initial?.extendMethod ?? "POST");
   const [extendBody, setExtendBody] = useState(
@@ -3308,9 +3310,12 @@ function ServerModal({
         panelUrl: panelUrl.trim(),
         panelUser: panelUser.trim(),
         panelPass,
-        apiBase: integrationMode === "propria" ? apiBase.trim() : (initial?.apiBase ?? ""),
-        apiToken: integrationMode === "propria" ? apiToken : "",
-        clearApiToken: integrationMode === "propria" ? clearApiToken : false,
+        // A base da API e o token ficam embutidos/gerenciados pelo
+        // servidor: em branco, o servidor mantém os salvos (e usa a
+        // base embutida do WPlay quando não há base salva).
+        apiBase: "",
+        apiToken: "",
+        clearApiToken: false,
         extendPath: extendPath.trim(),
         extendMethod: (["POST", "PUT", "PATCH", "GET"].includes(extendMethod)
           ? extendMethod
@@ -3354,12 +3359,6 @@ function ServerModal({
       return "";
     }
   })();
-
-  const baseHint = apiBase.includes("/auth/static-token")
-    ? "Você colou o endereço completo do teste. Ao salvar, o gestor guarda só a base e remove /auth/static-token para não duplicar o caminho."
-    : apiBase.trim().endsWith("/") && apiBase.trim().length > 8
-      ? "A base termina com barra. Ao salvar, o gestor remove a barra final."
-      : "";
 
   const renewStatus = !autoRenewEnabled
     ? "Desligada: pagamentos aprovados ficam como “extensão pendente” até você renovar."
@@ -3541,37 +3540,8 @@ function ServerModal({
                   {integrationMode === "propria" && (
                     <div className="space-y-3 border-t border-[var(--border)] pt-3">
                       <p className="text-sm text-[var(--dim)]">
-                        Opcional: a API deste painel pede usuário e senha do painel (campos username e password) para emitir o token — o teste de conexão envia os que já estão salvos neste servidor e guarda o token emitido, sem exibir. Se o seu painel tiver um token estático próprio, cole-o abaixo. Sem autenticação da API, a renovação fica pendente com o motivo e nenhum crédito é consumido.
+                        A conexão com a API do painel já vem embutida no gestor: ele entra com o usuário e a senha do painel salvos acima e guarda o token emitido, sem exibir. Não há nada de API ou token para preencher aqui.
                       </p>
-                      <div>
-                        <label htmlFor="s-api-base" className={labelCls}>Base da API do painel (opcional)</label>
-                        <input id="s-api-base" className={inputCls} value={apiBase} onChange={(e) => setApiBase(e.target.value)} placeholder="Em branco, usa o link do painel" autoComplete="off" />
-                        {baseHint && <p className="mt-1 rounded-lg bg-[var(--warn-bg)] px-3 py-2 text-sm text-[var(--warn)]" role="status">{baseHint}</p>}
-                      </div>
-                      <div>
-                        <label htmlFor="s-api-token" className={labelCls}>
-                          {initial?.hasApiToken ? "Token da API do painel (em branco mantém o salvo)" : "Token da API do painel (opcional)"}
-                        </label>
-                        <input
-                          id="s-api-token"
-                          type="password"
-                          className={inputCls}
-                          value={apiToken}
-                          onChange={(e) => setApiToken(e.target.value)}
-                          placeholder={initial?.hasApiToken ? "•••••••••• já salvo — preencha só para trocar" : "Preencha só se o painel tiver API com token"}
-                          autoComplete="off"
-                          disabled={clearApiToken}
-                        />
-                        <p className="mt-1 text-sm text-[var(--dim)]">
-                          Status: {initial?.hasApiToken ? "token salvo no gestor (nunca exibido)" : "nenhum token salvo"}.
-                        </p>
-                      </div>
-                      {initial?.hasApiToken && (
-                        <label className="flex items-start gap-2 text-sm">
-                          <input type="checkbox" checked={clearApiToken} onChange={(e) => setClearApiToken(e.target.checked)} className="mt-0.5 h-5 w-5" aria-label="Remover o token da API salvo" />
-                          <span>Remover o token da API salvo ao salvar este servidor</span>
-                        </label>
-                      )}
                       <div>
                         <p className="text-sm font-bold">Chamada que renova o cliente (o [+] Estender, pela API)</p>
                         <div className="mt-2 grid grid-cols-[1fr_130px] gap-3">
@@ -4800,7 +4770,7 @@ function MessagesTab({ data }: { data: State }) {
           alternativa da Meta foi removida deste gestor, então nenhum envio é feito por ela.
         </p>
         <ul className="mt-4 space-y-3">
-          {data.clients.map((c) => {
+          {data.clients.filter((c) => c.listState === "normal").map((c) => {
             const newExpiry = c.planDays != null ? todayPlusDays(c.planDays) : c.expiresAt;
             const rendered = renderMsg(template, {
               nome: c.name,
