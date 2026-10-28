@@ -125,6 +125,17 @@ function withInvoiceLink(
   return `${message}\n\nLink da fatura (toque para abrir e pagar com Pix): ${url}`;
 }
 
+// Modelo de aviso certo para os dias que faltam: vencido → expirado,
+// vence hoje → "vence hoje", ainda faltam dias → "vence em 3 dias".
+function warnTemplateFor(
+  left: number,
+  data: { warnMessage: string; warnSoonMessage: string; expiredMessage: string },
+): string {
+  if (left < 0) return data.expiredMessage;
+  if (left === 0) return data.warnMessage;
+  return data.warnSoonMessage;
+}
+
 function renderMsg(
   tpl: string,
   vars: { nome: string; usuario: string; vencimento: string; novoVencimento?: string; dias?: number | null; valor?: string; plano?: string | null; link?: string; telefone?: string; diasVencido?: number | null },
@@ -1474,7 +1485,7 @@ function ClientsTab({
             href={waLink(
               c.whatsapp,
               withInvoiceLink(
-                renderMsg(data.warnMessage, {
+                renderMsg(warnTemplateFor(daysLeft(c.expiresAt), data), {
                   nome: c.name,
                   usuario: c.iptvUser,
                   vencimento: fmtDate(c.expiresAt),
@@ -1706,10 +1717,16 @@ function ClientsTab({
           <ul className="mt-1 space-y-1 text-sm">
             {alerts.map((c) => {
               const left = daysLeft(c.expiresAt);
-              const msg = data.warnMessage
-                .replaceAll("{nome}", c.name)
-                .replaceAll("{usuario}", c.iptvUser)
-                .replaceAll("{vencimento}", fmtDate(c.expiresAt));
+              const msg = renderMsg(warnTemplateFor(left, data), {
+                nome: c.name,
+                usuario: c.iptvUser,
+                vencimento: fmtDate(c.expiresAt),
+                dias: c.planDays,
+                diasVencido: left < 0 ? -left : 0,
+                valor: brl(c.effectivePriceCents),
+                plano: c.planName,
+                link: invoiceUrl(c, data.publicBaseUrl),
+              });
               return (
                 <li key={c.id}>
                   <strong>{c.name}</strong> —{" "}
@@ -1894,7 +1911,7 @@ function ClientsTab({
 
 /* -------- Enviar mensagem automática (WhatsApp conectado) -------- */
 
-type SendTemplateKey = "expirado" | "vence-hoje" | "cobranca";
+type SendTemplateKey = "expirado" | "vence-hoje" | "vence-3-dias" | "cobranca";
 
 // Modal do botão "Enviar mensagem" de cada cliente: mostra o nome e o
 // telefone do cliente, o "Enviar por" (Automático/Padrão ou o
@@ -1914,7 +1931,11 @@ function SendMessageModal({
 }) {
   const [sendVia, setSendVia] = useState("auto");
   const [templateKey, setTemplateKey] = useState<SendTemplateKey>(
-    overdueDays(client.expiresAt) > 0 ? "expirado" : "vence-hoje",
+    overdueDays(client.expiresAt) > 0
+      ? "expirado"
+      : daysLeft(client.expiresAt) === 0
+        ? "vence-hoje"
+        : "vence-3-dias",
   );
   const [result, setResult] = useState<{ sent: boolean; detail: string } | null>(null);
 
@@ -1925,6 +1946,7 @@ function SendMessageModal({
   const templates: { key: SendTemplateKey; label: string; text: string }[] = [
     { key: "expirado", label: "Acesso expirado", text: data.expiredMessage },
     { key: "vence-hoje", label: "Vence hoje", text: data.warnMessage },
+    { key: "vence-3-dias", label: "Vence em 3 dias", text: data.warnSoonMessage },
     { key: "cobranca", label: "Cobrança", text: data.chargeMessage },
   ];
   const selected = templates.find((t) => t.key === templateKey) ?? templates[0]!;
@@ -4589,6 +4611,7 @@ type MessageKind = "aviso" | "renovada" | "expirada";
 function MessagesTab({ data }: { data: State }) {
   const queryClient = useQueryClient();
   const [warnMessage, setWarnMessage] = useState(data.warnMessage);
+  const [warnSoonMessage, setWarnSoonMessage] = useState(data.warnSoonMessage);
   const [renewedMessage, setRenewedMessage] = useState(data.renewedMessage);
   const [expiredMessage, setExpiredMessage] = useState(data.expiredMessage);
   const [chargeMessage, setChargeMessage] = useState(data.chargeMessage);
@@ -4598,15 +4621,17 @@ function MessagesTab({ data }: { data: State }) {
 
   useEffect(() => {
     setWarnMessage(data.warnMessage);
+    setWarnSoonMessage(data.warnSoonMessage);
     setRenewedMessage(data.renewedMessage);
     setExpiredMessage(data.expiredMessage);
     setChargeMessage(data.chargeMessage);
-  }, [data.warnMessage, data.renewedMessage, data.expiredMessage, data.chargeMessage]);
+  }, [data.warnMessage, data.warnSoonMessage, data.renewedMessage, data.expiredMessage, data.chargeMessage]);
 
   const save = useMutation({
     mutationFn: () =>
       api.saveMessageTemplates({
         warnMessage: warnMessage.trim(),
+        warnSoonMessage: warnSoonMessage.trim(),
         renewedMessage: renewedMessage.trim(),
         expiredMessage: expiredMessage.trim(),
         chargeMessage: chargeMessage.trim(),
@@ -4641,8 +4666,12 @@ function MessagesTab({ data }: { data: State }) {
         aria-label="Modelos de mensagens"
       >
         <div>
-          <label htmlFor="msg-warn" className={labelCls}>Aviso de vencimento próximo</label>
+          <label htmlFor="msg-warn" className={labelCls}>Aviso de vencimento — vence hoje</label>
           <textarea id="msg-warn" className={inputCls} rows={4} value={warnMessage} onChange={(e) => setWarnMessage(e.target.value)} required />
+        </div>
+        <div>
+          <label htmlFor="msg-warn-soon" className={labelCls}>Aviso de vencimento — vence em 3 dias</label>
+          <textarea id="msg-warn-soon" className={inputCls} rows={4} value={warnSoonMessage} onChange={(e) => setWarnSoonMessage(e.target.value)} required />
         </div>
         <div>
           <label htmlFor="msg-renewed" className={labelCls}>Conta renovada</label>
@@ -5251,7 +5280,7 @@ function DashboardTab({
                               href={waLink(
                                 c.whatsapp,
                                 withInvoiceLink(
-                                  renderMsg(data.warnMessage, {
+                                  renderMsg(warnTemplateFor(daysLeft(c.expiresAt), data), {
                                     nome: c.name,
                                     usuario: c.iptvUser,
                                     vencimento: fmtDate(c.expiresAt),
