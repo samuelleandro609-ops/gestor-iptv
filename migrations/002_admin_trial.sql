@@ -5,7 +5,7 @@
 -- acesso à interface — clientes, servidores, planos e cobranças
 -- permanecem intactos e voltam ao pagar.
 
--- Contas: papel (admin/user), fim do teste grátis de 5 dias,
+-- Contas: papel (admin/user), fim do teste grátis de 7 dias,
 -- vencimento da assinatura, valor da assinatura da conta e status.
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS role text NOT NULL DEFAULT 'user';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS trial_ends_at timestamp(3);
@@ -16,11 +16,11 @@ ALTER TABLE accounts ADD COLUMN IF NOT EXISTS last_login_at timestamp(3);
 
 -- Backfill: a conta de menor id é a da dona (criada primeiro no
 -- deploy) e vira administradora. As demais contas existentes ganham
--- teste de 5 dias contados da migração. Contas novas ganham o teste
--- no registro (created_at + 5 dias), no código.
+-- teste de 7 dias contados da migração. Contas novas ganham o teste
+-- no registro (created_at + 7 dias), no código.
 UPDATE accounts SET role = 'admin', sub_status = 'active' WHERE id = (SELECT MIN(id) FROM accounts);
 UPDATE accounts
-  SET trial_ends_at = statement_timestamp() + interval '5 days'
+  SET trial_ends_at = statement_timestamp() + interval '7 days'
   WHERE role <> 'admin' AND trial_ends_at IS NULL;
 
 -- Tokens de redefinição de senha: guarda só o HASH do token (sha256),
