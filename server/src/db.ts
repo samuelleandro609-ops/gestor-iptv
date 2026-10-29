@@ -53,7 +53,7 @@ export async function createDb(): Promise<Db> {
  *  dados. Não há migração de dados do gestor dentro do Muse — esta
  *  base começa vazia, como uma conta nova. */
 export async function migrate(db: Db): Promise<void> {
-  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql"]) {
+  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql"]) {
     const sqlText = readFileSync(
       join(import.meta.dir, "..", "..", "migrations", file),
       "utf8",
