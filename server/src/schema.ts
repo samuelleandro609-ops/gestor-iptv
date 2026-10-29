@@ -196,6 +196,11 @@ export const integrations = pgTable("integrations", {
   // banco já aplicado. Nada aqui é devolvido para a tela.
   apiBase: text("api_base").notNull().default(""),
   apiToken: text("api_token").notNull().default(""),
+  // Segredo ("secret") da API TopSul: vai no corpo JSON de cada
+  // chamada TopSul, junto com o token no caminho da URL. Fica só
+  // no banco e NUNCA é devolvido para a tela — a API expõe apenas
+  // se ele está salvo (hasApiSecret).
+  apiSecret: text("api_secret").notNull().default(""),
   status: text("status")
     .notNull()
     .default("nao_testado"),
