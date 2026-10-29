@@ -10,6 +10,7 @@ type Client = State["clients"][number];
 type Plan = State["plans"][number];
 type Server = State["servers"][number];
 type PanelDiagnostic = NonNullable<Server["apiDiagnostic"]>;
+type BrowserLocateDiagnostic = NonNullable<Server["browserLocateDiagnostic"]>;
 type PanelTestResult = ApiResponse<typeof api, "testPanelApi">;
 type QrStatus = ApiResponse<typeof api, "getWhatsAppQrStatus">;
 type Payment = State["payments"][number];
@@ -3120,6 +3121,74 @@ function PanelDiagnosticView({ diagnostic }: { diagnostic: PanelDiagnostic | nul
   );
 }
 
+const BROWSER_LOCATE_STAGE_LABELS: Record<string, string> = {
+  browser_launch: "Abrindo o navegador",
+  page_goto: "Abrindo a página de login",
+  spa_load: "Carregando a tela de login",
+  saved_login_screen: "Tela de login salvo",
+  login_form: "Formulário de login",
+  dashboard: "Painel (após entrar)",
+  customers_list: "Lista de clientes",
+  actions_menu: "Menu de ações do cliente",
+  renew_found: "Botão Renovar localizado",
+};
+
+const BROWSER_LOCATE_FLAG_LABELS: Record<string, string> = {
+  saved_login: "Tela de login salvo (“Fazer login com outra conta”)",
+  last_use: "“Último uso”",
+  user_placeholder: "Campo “Usuário ou E-mail”",
+  password_placeholder: "Campo “Senha”",
+  continue_button: "Botão “Continuar”",
+  forgot_password: "“Esqueceu a senha?”",
+  dashboard: "Tela do painel (Dashboard/Clientes)",
+  human_check: "Verificação “você é humano”",
+  cloudflare: "Cloudflare",
+  captcha: "Captcha",
+  access_denied: "Acesso negado",
+  just_a_moment: "“Just a moment”",
+};
+
+// Diagnóstico rico da localização do botão Renovar por navegador:
+// mostra onde a tentativa parou, quanto tempo levou, o que a tela
+// exibia e um trecho curto sanitizado — sem credencial nenhuma. O
+// trecho já vem sanitizado do servidor (usuário/senha/token
+// removidos antes de guardar).
+function BrowserLocateDiagnosticView({ diagnostic }: { diagnostic: BrowserLocateDiagnostic | null }) {
+  if (!diagnostic) return null;
+  const seenFlags = Object.entries(diagnostic.flags).filter(([, seen]) => seen);
+  const stepEntries = Object.entries(diagnostic.stepTimesMs).sort((a, b) => a[1] - b[1]);
+  return (
+    <div className="mt-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] p-3" aria-label="Diagnóstico da última tentativa de localização">
+      <p className="text-sm font-bold">Diagnóstico da última tentativa</p>
+      <p className="mt-1 text-sm">
+        Parou em: {BROWSER_LOCATE_STAGE_LABELS[diagnostic.stage] ?? diagnostic.stage} · tempo total: {(diagnostic.elapsedMs / 1000).toFixed(1)}s
+      </p>
+      {diagnostic.pageTitle || diagnostic.pagePath ? (
+        <p className="mt-1 break-all text-sm text-[var(--dim)]">
+          Página: {diagnostic.pageTitle ? `“${diagnostic.pageTitle}”` : ""} {diagnostic.pagePath} · texto visível: {diagnostic.visibleTextLength} caracteres
+        </p>
+      ) : (
+        <p className="mt-1 text-sm text-[var(--dim)]">Página: nenhuma tela foi carregada · texto visível: 0 caracteres</p>
+      )}
+      <p className="mt-1 text-sm">
+        Sinais vistos na tela:{" "}
+        {seenFlags.length > 0
+          ? seenFlags.map(([key]) => BROWSER_LOCATE_FLAG_LABELS[key] ?? key).join(" · ")
+          : "nenhum sinal detectado"}
+      </p>
+      {stepEntries.length > 0 && (
+        <p className="mt-1 text-sm text-[var(--dim)]">
+          Etapas:{" "}
+          {stepEntries.map(([stage, ms]) => `${BROWSER_LOCATE_STAGE_LABELS[stage] ?? stage} (${(ms / 1000).toFixed(1)}s)`).join(" → ")}
+        </p>
+      )}
+      <p className="mt-1 text-sm">
+        Trecho da tela: <span className="break-words">“{diagnostic.snippet}”</span>
+      </p>
+    </div>
+  );
+}
+
 /* ---------------- Servidores ---------------- */
 
 function SwitchToggle({
@@ -3615,6 +3684,9 @@ function ServersTab({ data }: { data: State }) {
                           ? ` Testado em ${new Date(s.browserLocateTestedAt).toLocaleString("pt-BR")}.`
                           : ""}
                       </p>
+                    )}
+                    {s.browserLocateDiagnostic && (
+                      <BrowserLocateDiagnosticView diagnostic={s.browserLocateDiagnostic} />
                     )}
                   </div>
                 )}
