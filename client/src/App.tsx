@@ -3164,6 +3164,8 @@ function ServersTab({ data }: { data: State }) {
   const [testErrors, setTestErrors] = useState<Record<number, string>>({});
   const [extendMsgs, setExtendMsgs] = useState<Record<number, string>>({});
   const [extendClient, setExtendClient] = useState<Record<number, string>>({});
+  const [locateMsgs, setLocateMsgs] = useState<Record<number, string>>({});
+  const [locateClient, setLocateClient] = useState<Record<number, string>>({});
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["state"] });
 
   const del = useMutation({
@@ -3195,6 +3197,16 @@ function ServersTab({ data }: { data: State }) {
       invalidate();
     },
     onError: (e, args) => setExtendMsgs((prev) => ({ ...prev, [args.serverId]: String(e) })),
+  });
+  // Etapa 1 da automação do botão Renovar (Sigma sem token): só
+  // LOCALIZA o botão na tela do painel, sem clicar e sem renovar.
+  const locateBtn = useMutation({
+    mutationFn: (args: { serverId: number; clientId: number }) => api.testSigmaBrowserLocate(args),
+    onSuccess: (r, args) => {
+      setLocateMsgs((prev) => ({ ...prev, [args.serverId]: r.detail }));
+      invalidate();
+    },
+    onError: (e, args) => setLocateMsgs((prev) => ({ ...prev, [args.serverId]: String(e) })),
   });
   const setActive = useMutation({
     mutationFn: (args: { id: number; active: boolean }) => api.setServerActive(args),
@@ -3321,6 +3333,14 @@ function ServersTab({ data }: { data: State }) {
           const renew = autoRenewInfo(s);
           const linkedName = integrationName(s);
           const isSigma = panelProviderOf(s) === "sigma";
+          // Modo sessão (Sigma sem token): nem o servidor nem a
+          // integração vinculada têm token da API Sigma salvo — é
+          // para estes que existe a localização do botão pela tela.
+          const linkedIntegration =
+            s.panelIntegrationId != null
+              ? data.integrations.find((i) => i.id === s.panelIntegrationId)
+              : undefined;
+          const sigmaNoToken = isSigma && !s.hasApiToken && !linkedIntegration?.hasApiToken;
           return (
             <article
               key={s.id}
@@ -3546,6 +3566,58 @@ function ServersTab({ data }: { data: State }) {
                   )}
                   {extendMsgs[s.id] && <p className="mt-1 text-sm font-medium">{extendMsgs[s.id]}</p>}
                 </div>
+                {sigmaNoToken && (
+                  <div className="mt-3 border-t border-[var(--border)] pt-3">
+                    <p className="text-sm font-bold">
+                      Renovar pelo botão da tela (navegador — só leitura)
+                      {s.browserLocateFound ? " — botão localizado" : ""}
+                    </p>
+                    <p className="mt-1 text-sm text-[var(--dim)]">
+                      Etapa 1: o gestor abre o painel com o link, o usuário e a senha salvos neste servidor, procura o cliente e só verifica se o botão
+                      Renovar aparece no menu de ações. Nada é clicado, nada é renovado e nenhum crédito é consumido. A renovação automática ainda não
+                      existe por este caminho.
+                    </p>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
+                      <div>
+                        <label htmlFor={`locate-client-${s.id}`} className={labelCls}>Cliente para localizar o botão</label>
+                        <select
+                          id={`locate-client-${s.id}`}
+                          className={inputCls}
+                          value={locateClient[s.id] ?? ""}
+                          onChange={(e) => setLocateClient((prev) => ({ ...prev, [s.id]: e.target.value }))}
+                        >
+                          <option value="">Selecione um cliente…</option>
+                          {data.clients
+                            .filter((c) => c.listState === "normal" && c.planId != null && (c.serverId == null || c.serverId === s.id))
+                            .map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name} ({c.iptvUser}) — {c.planName}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                      <div className="flex items-end">
+                        <button
+                          type="button"
+                          className={btnGhost}
+                          disabled={!locateClient[s.id] || locateBtn.isPending}
+                          onClick={() => locateBtn.mutate({ serverId: s.id, clientId: Number(locateClient[s.id]) })}
+                          aria-label={`Localizar o botão Renovar na tela do painel para o servidor ${s.name} (só leitura)`}
+                        >
+                          {locateBtn.isPending ? "Localizando…" : "Localizar botão Renovar (só leitura)"}
+                        </button>
+                      </div>
+                    </div>
+                    {(locateMsgs[s.id] || s.browserLocateDetail) && (
+                      <p className="mt-1 text-sm font-medium" role="status">
+                        {locateMsgs[s.id] || s.browserLocateDetail}
+                        {s.browserLocateTestedAt && !locateMsgs[s.id]
+                          ? ` Testado em ${new Date(s.browserLocateTestedAt).toLocaleString("pt-BR")}.`
+                          : ""}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="mt-3 flex flex-wrap gap-2">
@@ -6491,6 +6563,9 @@ function PanelsIntegration({ data }: { data: State }) {
   const [showProviders, setShowProviders] = useState(false);
   const [editing, setEditing] = useState<Integration | null | undefined>(undefined);
   const [provider, setProvider] = useState<"wplay" | "sigma">("wplay");
+  // Sigma: "token" (API de revendedor) ou "login" (modo sessão: link
+  // + usuário + senha do painel, sem token — igual ao outro gestor).
+  const [sigmaMode, setSigmaMode] = useState<"token" | "login">("token");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [panelUser, setPanelUser] = useState("");
@@ -6506,13 +6581,25 @@ function PanelsIntegration({ data }: { data: State }) {
   const save = useMutation({
     mutationFn: () =>
       provider === "sigma"
-        ? api.saveIntegration({
-            id: editing?.id,
-            provider: "sigma",
-            name: name.trim(),
-            apiBase: apiBase.trim(),
-            apiToken,
-          })
+        ? sigmaMode === "login"
+          ? api.saveIntegration({
+              id: editing?.id,
+              provider: "sigma",
+              sigmaMode: "login",
+              name: name.trim(),
+              url: url.trim(),
+              panelUser: panelUser.trim(),
+              panelPass,
+              apiBase: apiBase.trim(),
+            })
+          : api.saveIntegration({
+              id: editing?.id,
+              provider: "sigma",
+              sigmaMode: "token",
+              name: name.trim(),
+              apiBase: apiBase.trim(),
+              apiToken,
+            })
         : api.saveIntegration({
             id: editing?.id,
             provider: "wplay",
@@ -6571,6 +6658,7 @@ function PanelsIntegration({ data }: { data: State }) {
   function openNew(nextProvider: "wplay" | "sigma") {
     setEditing(null);
     setProvider(nextProvider);
+    setSigmaMode("token");
     setName("");
     setUrl("");
     setPanelUser("");
@@ -6583,6 +6671,7 @@ function PanelsIntegration({ data }: { data: State }) {
   function openEdit(i: Integration) {
     setEditing(i);
     setProvider(i.provider === "sigma" ? "sigma" : "wplay");
+    setSigmaMode(i.provider === "sigma" && !i.hasApiToken ? "login" : "token");
     setName(i.name);
     setUrl(i.url);
     setPanelUser(i.panelUser);
@@ -6651,7 +6740,7 @@ function PanelsIntegration({ data }: { data: State }) {
               aria-label="Adicionar integração Sigma"
             >
               <span className="font-display text-lg font-extrabold">Sigma (OneTV)</span>
-              <span className="text-sm text-[var(--dim)]">Painel OneTV/NEWONETV — nome, base da API de revendedor e token Bearer. O token pede os acessos: me.read, customers.read e customers.renew.</span>
+              <span className="text-sm text-[var(--dim)]">Painel Sigma — por token da API de revendedor ou por login (nome, link, usuário e senha do painel, sem token).</span>
             </button>
           </div>
         </div>
@@ -6665,7 +6754,12 @@ function PanelsIntegration({ data }: { data: State }) {
             e.preventDefault();
             setFormError(null);
             if (provider === "sigma") {
-              if (!name.trim() || !apiBase.trim() || (!editing && !apiToken.trim())) {
+              if (sigmaMode === "login") {
+                if (!name.trim() || !url.trim() || !panelUser.trim() || (!editing && !panelPass) || (editing && !panelPass && !editing.hasPass)) {
+                  setFormError("Preencha nome, link do painel, usuário e senha do painel.");
+                  return;
+                }
+              } else if (!name.trim() || !apiBase.trim() || (!editing && !apiToken.trim())) {
                 setFormError("Preencha nome, base da API e o token da API Sigma.");
                 return;
               }
@@ -6678,6 +6772,58 @@ function PanelsIntegration({ data }: { data: State }) {
         >
           <h3 className="font-display text-lg font-bold">{editing ? `Editar integração — ${provider === "sigma" ? "Sigma" : "WPlay"}` : `Nova integração — ${provider === "sigma" ? "Sigma" : "WPlay"}`}</h3>
           {provider === "sigma" ? (
+            <>
+              <div className="grid gap-2 sm:grid-cols-2" role="group" aria-label="Modo da integração Sigma">
+                <button
+                  type="button"
+                  className={`rounded-xl border-2 p-3 text-left ${sigmaMode === "token" ? "border-[var(--accent)] bg-[var(--surface2)]" : "border-[var(--border)]"}`}
+                  onClick={() => setSigmaMode("token")}
+                  aria-pressed={sigmaMode === "token"}
+                >
+                  <span className="font-bold">Por token (API de revendedor)</span>
+                  <span className="block text-sm text-[var(--dim)]">Caminho oficial e completo, com assinatura no painel.</span>
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-xl border-2 p-3 text-left ${sigmaMode === "login" ? "border-[var(--accent)] bg-[var(--surface2)]" : "border-[var(--border)]"}`}
+                  onClick={() => setSigmaMode("login")}
+                  aria-pressed={sigmaMode === "login"}
+                >
+                  <span className="font-bold">Por login (usuário e senha)</span>
+                  <span className="block text-sm text-[var(--dim)]">Sem token: só nome, link, usuário e senha. A renovação por aqui ainda está em construção (etapa 1: só localizar o botão).</span>
+                </button>
+              </div>
+              {sigmaMode === "login" ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="int-name" className={labelCls}>Nome da integração *</label>
+                    <input id="int-name" className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="Ex.: Meu painel Sigma" autoComplete="off" required />
+                  </div>
+                  <div>
+                    <label htmlFor="int-url" className={labelCls}>Link do painel *</label>
+                    <input id="int-url" className={inputCls} value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://painel.exemplo.com" autoComplete="off" required />
+                  </div>
+                  <div>
+                    <label htmlFor="int-user" className={labelCls}>Usuário do painel *</label>
+                    <input id="int-user" className={inputCls} value={panelUser} onChange={(e) => setPanelUser(e.target.value)} autoComplete="off" required />
+                  </div>
+                  <div>
+                    <label htmlFor="int-pass" className={labelCls}>
+                      {editing ? "Senha do painel (em branco mantém a salva)" : "Senha do painel *"}
+                    </label>
+                    <input
+                      id="int-pass"
+                      type="password"
+                      className={inputCls}
+                      value={panelPass}
+                      onChange={(e) => setPanelPass(e.target.value)}
+                      placeholder={editing ? "•••••• salva no gestor — nunca exibida" : ""}
+                      autoComplete="off"
+                    />
+                    <p className="mt-1 text-sm text-[var(--dim)]">A senha fica salva no gestor e nunca volta para a tela. Depois de vincular a um servidor, use “Localizar botão Renovar (só leitura)” no cartão do servidor.</p>
+                  </div>
+                </div>
+              ) : (
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <label htmlFor="int-name" className={labelCls}>Nome da integração *</label>
@@ -6706,6 +6852,8 @@ function PanelsIntegration({ data }: { data: State }) {
                 </p>
               </div>
             </div>
+              )}
+            </>
           ) : (
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
@@ -6747,8 +6895,9 @@ function PanelsIntegration({ data }: { data: State }) {
             </button>
           </div>
           <p className="text-sm text-[var(--dim)]">
-            Depois de salvar, use “Testar conexão” no cartão da integração. Ela também aparece no cadastro de
-            Servidor, em Integração → Painel IPTV, para vincular testes e renovações automáticas.
+            {provider === "sigma" && sigmaMode === "login"
+              ? "Depois de salvar, vincule esta integração a um servidor (botão “Vincular” no cartão) e use “Localizar botão Renovar (só leitura)” no cartão do servidor. O “Testar conexão” do cartão da integração testa a API com token e não vale para o modo por login."
+              : "Depois de salvar, use “Testar conexão” no cartão da integração. Ela também aparece no cadastro de Servidor, em Integração → Painel IPTV, para vincular testes e renovações automáticas."}
           </p>
         </form>
       )}
@@ -6775,7 +6924,11 @@ function PanelsIntegration({ data }: { data: State }) {
                   <div className="min-w-0">
                     <p className="font-display text-lg font-bold">{i.name}</p>
                     {i.provider === "sigma" ? (
-                      <p className="text-sm text-[var(--dim)]">Sigma (OneTV) • base da API: <span className="break-all font-mono text-xs">{i.apiBase || DEFAULT_SIGMA_API_BASE}</span> • token: {i.hasApiToken ? "salvo (nunca exibido)" : "não salvo"}</p>
+                      i.hasApiToken ? (
+                        <p className="text-sm text-[var(--dim)]">Sigma (OneTV) • por token • base da API: <span className="break-all font-mono text-xs">{i.apiBase || DEFAULT_SIGMA_API_BASE}</span> • token: salvo (nunca exibido)</p>
+                      ) : (
+                        <p className="text-sm text-[var(--dim)]">Sigma (OneTV) • por login (sem token) • usuário do painel: {i.panelUser} • senha: {i.hasPass ? "salva (nunca exibida)" : "não salva"}</p>
+                      )
                     ) : (
                       <p className="text-sm text-[var(--dim)]">WPlay • usuário: {i.panelUser} • senha: {i.hasPass ? "salva (nunca exibida)" : "não salva"}</p>
                     )}
