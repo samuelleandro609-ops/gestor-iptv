@@ -365,15 +365,42 @@ export async function locateSigmaRenewButton(
     try {
       browser = await chromium.launch({
         headless: true,
-        args: ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        // Disfarce de fingerprint (UMA tentativa autorizada): o servidor
+        // do painel devolveu "404 Not Found nginx" ao navegador automático
+        // no Render, então a apresentação passa a imitar um navegador
+        // comum de desktop. Se o bloqueio for por IP do Render, isto
+        // NÃO vai adiantar — só o teste real dirá.
+        args: [
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-gpu",
+          "--disable-blink-features=AutomationControlled",
+        ],
         timeout: STEP_TIMEOUT_MS,
       });
       const context = await browser.newContext({
-        viewport: { width: 1280, height: 800 },
+        viewport: { width: 1366, height: 768 },
         userAgent:
-          "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        locale: "pt-BR",
+        timezoneId: "America/Sao_Paulo",
+        hasTouch: false,
+        isMobile: false,
+        deviceScaleFactor: 1,
+        extraHTTPHeaders: { "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7" },
       });
       const page = await context.newPage();
+      // Normalização de fingerprint, sem tocar em detecção de desafio:
+      // esconde navigator.webdriver e apresenta chrome.runtime/languages
+      // plausíveis de um Chrome comum. Nenhum captcha é resolvido.
+      await page.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+        Object.defineProperty(navigator, "languages", { get: () => ["pt-BR", "pt", "en-US", "en"] });
+        // Plataforma coerente com o UA Windows: sem isto, o Chromium
+        // expõe "Linux x86_64" e denuncia a incoerência.
+        Object.defineProperty(navigator, "platform", { get: () => "Win32" });
+        (globalThis as unknown as { chrome?: unknown }).chrome = { runtime: {} };
+      });
       diagPage = page;
       page.setDefaultTimeout(STEP_TIMEOUT_MS);
 
