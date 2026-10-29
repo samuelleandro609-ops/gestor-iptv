@@ -2390,6 +2390,14 @@ export const Actions = {
           loadPanelStatus(ctx, ownerId),
         ]);
       const serverById = new Map<number, typeof schema.servers.$inferSelect>(serverRows.map((x) => [x.id, x]));
+      // Mapa só dos servidores visíveis (WPlay): o nome exibido do
+      // servidor de um cliente deve ser um servidor que existe na tela
+      // de Servidores. Cliente ligado a servidor apagado ou oculto
+      // (provedor removido) mostra "Servidor removido", não um nome
+      // de um servidor que a dona não vê mais.
+      const visibleServerById = new Map<number, typeof schema.servers.$inferSelect>(
+        serverRows.filter((x) => (x.panelProvider ?? "wplay") === "wplay").map((x) => [x.id, x]),
+      );
       const planById = new Map<number, typeof schema.plans.$inferSelect>(planRows.map((x) => [x.id, x]));
       const invoiceTokens = await ensureInvoiceTokens(ctx, clientRows);
       // Acesso da própria conta (teste/assinatura/bloqueio) e, só
@@ -2509,7 +2517,9 @@ export const Actions = {
         })),
         clients: clientRows.map((c) => {
           const plan = c.planId != null ? planById.get(c.planId) : undefined;
-          const server = c.serverId != null ? serverById.get(c.serverId) : undefined;
+          const server = c.serverId != null ? visibleServerById.get(c.serverId) : undefined;
+          const serverName =
+            server?.name ?? (c.serverId != null ? "Servidor removido" : null);
           return {
             id: c.id,
             name: c.name,
@@ -2517,7 +2527,7 @@ export const Actions = {
             iptvUser: c.iptvUser,
             hasPass: c.iptvPass.length > 0,
             serverId: c.serverId ?? null,
-            serverName: server?.name ?? null,
+            serverName: serverName,
             planId: c.planId ?? null,
             planName: plan?.name ?? null,
             planDays: plan?.days ?? null,
