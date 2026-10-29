@@ -572,7 +572,7 @@ async function loadPanelStatus(ctx: Ctx, ownerId: number): Promise<{
   const rows = await db.select().from(schema.servers).where(eq(schema.servers.ownerId, ownerId));
   // Linhas de provedor removido são ignoradas: nunca contam como
   // conectadas nem como prontas para extensão.
-  const usableRows = rows.filter((r) => (r.panelProvider ?? "wplay") === "wplay");
+  const usableRows = rows.filter((r) => isSupportedPanelProvider(r.panelProvider ?? "wplay"));
   const simpleConnected = usableRows.find((r) => (r.panelConnected ?? 0) === 1);
   if (simpleConnected) {
     return {
@@ -609,6 +609,25 @@ async function loadPanelStatus(ctx: Ctx, ownerId: number): Promise<{
       extendDetail: "Extensão pendente: primeiro o teste de conexão da API precisa passar.",
     };
   }
+  // TopSul: o token e o segredo ficam na integração vinculada, não
+  // no servidor — por isso o servidor não aparece no caso acima.
+  // Se há credencial TopSul salva mas o teste ainda não passou, o
+  // motivo é o mesmo: falta o teste de conexão da integração.
+  const intRows = await db.select().from(schema.integrations).where(eq(schema.integrations.ownerId, ownerId));
+  const topsulPending = usableRows.find((r) => {
+    if ((r.panelProvider ?? "wplay") !== "topsul" || r.panelIntegrationId == null) return false;
+    const linked = intRows.find((x) => x.id === r.panelIntegrationId);
+    return !!linked && linked.apiToken.length > 0;
+  });
+  if (topsulPending) {
+    return {
+      connected: false,
+      extendReady: false,
+      detail:
+        "Há token e segredo da API TopSul salvos, mas o teste de conexão ainda não passou. A renovação continua marcada como pendente até o teste de conexão passar na aba Integrações (ou no cartão do servidor).",
+      extendDetail: "Extensão pendente: primeiro o teste de conexão da API TopSul precisa passar.",
+    };
+  }
   return {
     connected: false,
     extendReady: false,
@@ -627,7 +646,7 @@ async function resolvePanelServer(
 ): Promise<typeof schema.servers.$inferSelect | null> {
   const db = ctx.db<typeof schema>();
   const rows = await db.select().from(schema.servers).where(eq(schema.servers.ownerId, client.ownerId));
-  const usableRows = rows.filter((r) => (r.panelProvider ?? "wplay") === "wplay");
+  const usableRows = rows.filter((r) => isSupportedPanelProvider(r.panelProvider ?? "wplay"));
   if (client.serverId != null) {
     const own = usableRows.find((r) => r.id === client.serverId);
     if (own && own.apiVerified === 1) return own;
@@ -820,10 +839,24 @@ function panelResponseFailureMessage(raw: string): string | null {
 async function panelExtendUser(
   server: typeof schema.servers.$inferSelect,
   args: { iptvUser: string; iptvPass: string; days: number },
+  topsul?: TopsulCreds | null,
 ): Promise<{ ok: boolean; detail: string }> {
+  // TopSul: a renovação usa o endpoint renew_client com o token e o
+  // segredo guardados na integração vinculada — nunca chama a API
+  // WPlay. As credenciais chegam resolvidas por quem chama; sem
+  // elas, volta como pendente sem chamar nada.
+  if ((server.panelProvider ?? "wplay") === "topsul") {
+    if (!topsul) {
+      return {
+        ok: false,
+        detail: `Este servidor usa a integração TopSul, mas nenhuma integração TopSul está vinculada a ele. Vincule uma integração TopSul em Servidores → Editar para a renovação automática funcionar. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+      };
+    }
+    return topsulRenewClient(topsul, { iptvUser: args.iptvUser, days: args.days });
+  }
   // Provedor removido do gestor: nunca chama API nenhuma — volta
   // como pendente com o motivo em linguagem simples.
-  if ((server.panelProvider ?? "wplay") !== "wplay") {
+  if (!isSupportedPanelProvider(server.panelProvider ?? "wplay")) {
     return { ok: false, detail: "Este servidor usa um provedor de painel que foi removido do gestor a pedido da dona. A renovação automática não funciona mais por ele; cadastre o painel como servidor WPlay (link, usuário e senha) para voltar a renovar automaticamente. Nada foi renovado e nenhum crédito foi consumido." };
   }
   const baseCheck = inspectPanelApiBase(resolvePanelApiBase(server.apiBase));
@@ -1214,6 +1247,399 @@ async function panelTestConnection(
   return { connected: false, detail: headline, diagnostic };
 }
 
+// ---------------- TopSul (painel CS TopSul) ----------------
+// API documentada no openapi.json enviado pela dona (Painel CS
+// TopSul v4.0.0, multi-revendedor): base + /topsul/*, autenticação
+// em DUAS partes — o token vai no caminho da URL e o "secret" vai
+// no corpo JSON de cada chamada. Só dois endpoints são usados:
+// profile (teste de conexão) e renew_client (renovação). As
+// respostas NÃO têm formato documentado (esquema vazio), então o
+// teste e a renovação são PROVISÓRIOS até um teste real com
+// credencial de verdade: HTTP 2xx sem marcador de erro no corpo
+// conta como sucesso; corpo com marcador de erro fica pendente, sem
+// fingir. A verificação TLS NUNCA é desligada: se o certificado do
+// servidor estiver vencido/inválido, a chamada falha com mensagem
+// em linguagem simples pedindo a renovação do certificado.
+
+const DEFAULT_TOPSUL_API_BASE = "https://vmi2606883.contaboserver.net";
+
+// Provedores de painel ativos no gestor. Qualquer outro valor em
+// provider/panelProvider é um provedor removido: as linhas são
+// ignoradas e nenhum dado é apagado.
+function isSupportedPanelProvider(provider: string | null | undefined): boolean {
+  return provider === "wplay" || provider === "topsul";
+}
+
+type TopsulCreds = { apiBase: string; token: string; secret: string };
+
+function resolveTopsulApiBase(raw: string): string {
+  const trimmed = raw.trim();
+  return trimmed || DEFAULT_TOPSUL_API_BASE;
+}
+
+// Normaliza a base da API TopSul: sem espaços, sem barra final, com
+// https:// e sem o caminho /topsul (os endpoints já incluem /topsul).
+function inspectTopsulApiBase(raw: string): {
+  original: string;
+  valid: boolean;
+  normalized: string;
+  error: string;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const original = raw.trim();
+  if (!original) {
+    return { original, valid: false, normalized: "", error: "A base da API está vazia.", warnings };
+  }
+  let candidate = original.replace(/\s+/g, "");
+  if (candidate !== original) warnings.push("Havia espaços na base; eles foram removidos para o teste.");
+  if (candidate.endsWith("/")) {
+    candidate = candidate.replace(/\/+$/, "");
+    warnings.push("A base terminava com barra (/). A barra final foi removida.");
+  }
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+    candidate = `https://${candidate}`;
+    warnings.push("A base estava sem https:// no começo; o teste usou https:// automaticamente.");
+  }
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return {
+      original,
+      valid: false,
+      normalized: "",
+      error: "A base da API não é um endereço válido. Ela precisa se parecer com https://vmi2606883.contaboserver.net.",
+      warnings,
+    };
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return {
+      original,
+      valid: false,
+      normalized: "",
+      error: `A base começa com “${url.protocol}”, mas a API precisa usar http:// ou https://.`,
+      warnings,
+    };
+  }
+  if (url.username || url.password) {
+    warnings.push("A base tinha usuário/senha escritos dentro do endereço; eles foram ignorados. Token e segredo ficam nos campos próprios da integração.");
+    url.username = "";
+    url.password = "";
+  }
+  if (url.search || url.hash) {
+    warnings.push("A base tinha texto depois de ? ou #; essa parte foi removida.");
+    url.search = "";
+    url.hash = "";
+  }
+  let path = url.pathname.replace(/\/{2,}/g, "/");
+  while (path.toLowerCase().endsWith("/topsul")) {
+    path = path.slice(0, -"/topsul".length);
+    warnings.push("A base terminava em /topsul. Essa parte foi removida porque os endpoints já incluem /topsul no caminho.");
+  }
+  path = path.replace(/\/+$/, "");
+  if (path) {
+    warnings.push(`A base tem um caminho extra (${path}). O teste chamou esse caminho + /topsul/profile. Se a API fica direto no endereço principal, apague esse caminho da base.`);
+  }
+  const normalized = `${url.protocol}//${url.host}${path}`;
+  return { original, valid: true, normalized, error: "", warnings: [...new Set(warnings)] };
+}
+
+const TOPSUL_CERT_DETAIL =
+  "O certificado de segurança do servidor da API TopSul venceu ou é inválido, e o gestor não ignora essa verificação — nenhuma credencial foi enviada e nada foi renovado. Peça para quem cuida do servidor renovar o certificado e toque em “Testar conexão” de novo.";
+
+// Erro de rede causado pelo certificado (vencido, autoassinado ou
+// não confiável). A mensagem exata varia com o ambiente, então a
+// detecção olha o texto do erro e da causa, sem desligar nada.
+function isCertificateError(e: unknown): boolean {
+  const parts: string[] = [];
+  let current: unknown = e;
+  for (let depth = 0; depth < 3 && current != null; depth++) {
+    if (current instanceof Error) {
+      parts.push(current.name, current.message);
+      current = (current as { cause?: unknown }).cause;
+    } else {
+      parts.push(String(current));
+      break;
+    }
+  }
+  return /certificate|cert\b|ssl|tls|self.signed|unable to verify|ERR_CERT|certification/i.test(parts.join(" "));
+}
+
+type TopsulHttpResult =
+  | { kind: "http"; status: number; body: string }
+  | { kind: "network"; message: string; cert: boolean };
+
+async function topsulPost(
+  url: string,
+  body: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<TopsulHttpResult> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const text = await res.text().catch(() => "");
+    return { kind: "http", status: res.status, body: text };
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e);
+    const timedOut =
+      e instanceof Error && (e.name === "TimeoutError" || /timed out|timeout|abort/i.test(rawMessage));
+    return {
+      kind: "network",
+      message: timedOut
+        ? `A API não respondeu dentro de ${Math.round(timeoutMs / 1000)} segundos.`
+        : rawMessage,
+      cert: isCertificateError(e),
+    };
+  }
+}
+
+// Campos óbvios de saldo no perfil, quando a resposta trouxer algum:
+// só o que está de fato no corpo é mostrado — nada é inventado.
+function topsulProfileBalanceNote(rawBody: string): string {
+  try {
+    const data = JSON.parse(rawBody) as unknown;
+    if (!data || typeof data !== "object") return "";
+    const obj = data as Record<string, unknown>;
+    for (const key of ["credits", "creditsBalance", "credits_balance", "balance", "saldo", "creditos"]) {
+      const value = obj[key];
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return ` Saldo informado pelo painel: ${value} crédito(s).`;
+      }
+    }
+    const nested = obj.data ?? obj.profile ?? obj.result;
+    if (nested && typeof nested === "object") {
+      for (const key of ["credits", "creditsBalance", "credits_balance", "balance", "saldo", "creditos"]) {
+        const value = (nested as Record<string, unknown>)[key];
+        if (typeof value === "number" && Number.isFinite(value)) {
+          return ` Saldo informado pelo painel: ${value} crédito(s).`;
+        }
+      }
+    }
+  } catch {}
+  return "";
+}
+
+function topsulCorrectionSteps(classification: string): string[] {
+  const common = [
+    "O token e o segredo ficam salvos na integração TopSul (aba Integrações). Confira se são o token e o segredo desta conta de revendedor — cada conta tem os seus, e eles nunca são exibidos na tela.",
+    "A base da API já vem preenchida no gestor. Se a API mudou de endereço, confira a base na integração.",
+  ];
+  if (classification === "certificado") {
+    return [
+      "O certificado de segurança do servidor da API venceu ou é inválido. Só quem cuida do servidor consegue renovar — o gestor não ignora essa verificação.",
+      ...common,
+    ];
+  }
+  if (classification === "credencial_recusada") {
+    return [
+      "A API respondeu, mas recusou o token ou o segredo. Gere um token/segredo novo no painel TopSul e salve na integração.",
+      ...common,
+    ];
+  }
+  if (classification === "base_ou_caminho_errado") {
+    return [
+      "A API respondeu que o endereço/caminho não existe. Confira a base da API na integração (ela não deve terminar em /topsul).",
+      ...common,
+    ];
+  }
+  if (classification === "sem_resposta") {
+    return [
+      "O gestor não recebeu resposta da API. Confira se a base está certa e se o servidor da API está fora do ar; tente novamente em alguns minutos.",
+      ...common.slice(0, 1),
+    ];
+  }
+  return common;
+}
+
+// Testa a conexão TopSul chamando POST /topsul/profile/{token} com
+// {"secret"}. Só HTTP 2xx sem erro declarado no corpo marca
+// conectado. Nenhum crédito é consumido. O token e o segredo nunca
+// aparecem no diagnóstico (são substituídos antes de guardar).
+async function topsulTestConnection(creds: TopsulCreds): Promise<PanelTestResult> {
+  const testedAt = new Date().toISOString();
+  const base = inspectTopsulApiBase(creds.apiBase);
+  const endpoint = base.valid ? `${base.normalized}/topsul/profile/{token}` : "";
+  const makeDiagnostic = (
+    classification: string,
+    headline: string,
+    attempts: PanelAuthAttempt[],
+    winningVariant = "",
+  ): PanelDiagnostic => ({
+    testedAt,
+    endpoint,
+    baseOriginal: base.original,
+    baseNormalized: base.normalized,
+    baseWarnings: base.warnings,
+    classification,
+    headline,
+    winningVariant,
+    responseBody: [...attempts].reverse().find((a) => a.httpStatus != null)?.responseBody ?? "",
+    attempts,
+    steps: topsulCorrectionSteps(classification),
+  });
+  if (!base.valid) {
+    const diagnostic = makeDiagnostic("base_invalida", `Não conectou: ${base.error}`, []);
+    return { connected: false, detail: diagnostic.headline, diagnostic };
+  }
+  if (!creds.token || !creds.secret) {
+    const diagnostic = makeDiagnostic(
+      "sem_credencial",
+      "Não conectou: o token ou o segredo da API TopSul não estão salvos nesta integração. Preencha os dois na aba Integrações e toque em “Testar conexão” de novo.",
+      [],
+    );
+    return { connected: false, detail: diagnostic.headline, diagnostic };
+  }
+  const url = `${base.normalized}/topsul/profile/${encodeURIComponent(creds.token)}`;
+  const result = await topsulPost(url, { secret: creds.secret }, 10000);
+  if (result.kind === "network") {
+    const classification = result.cert ? "certificado" : "sem_resposta";
+    const headline = result.cert
+      ? `Não conectou: ${TOPSUL_CERT_DETAIL}`
+      : "Não conectou: a API TopSul não respondeu. Ela pode estar fora do ar, ou a base salva leva a um endereço que não responde. A renovação continua pendente e nenhum crédito foi consumido.";
+    const attempt: PanelAuthAttempt = {
+      id: "profile",
+      label: "Perfil (POST /topsul/profile/{token})",
+      description: "Chamada de perfil da API TopSul com o token no caminho e o segredo no corpo.",
+      httpStatus: null,
+      responseBody: "",
+      error: result.cert ? "Certificado de segurança vencido ou inválido." : sanitizePanelResponseBody(result.message, [creds.token, creds.secret], 240),
+      success: false,
+    };
+    const diagnostic = makeDiagnostic(classification, headline, [attempt]);
+    return { connected: false, detail: headline, diagnostic };
+  }
+  const shownBody = sanitizePanelResponseBody(result.body, [creds.token, creds.secret], 500);
+  const failureMessage = panelResponseFailureMessage(result.body);
+  const success = result.status >= 200 && result.status < 300 && !failureMessage;
+  const attempt: PanelAuthAttempt = {
+    id: "profile",
+    label: "Perfil (POST /topsul/profile/{token})",
+    description: "Chamada de perfil da API TopSul com o token no caminho e o segredo no corpo.",
+    httpStatus: result.status,
+    responseBody: shownBody,
+    error: failureMessage ?? "",
+    success,
+  };
+  if (success) {
+    const headline = `Conectou: a API TopSul aceitou o token e o segredo (HTTP ${result.status}).${topsulProfileBalanceNote(result.body)} O painel passa a ser tratado como conectado neste gestor.`;
+    return { connected: true, detail: headline, diagnostic: makeDiagnostic("conectado", headline, [attempt], "profile") };
+  }
+  let classification = "falha_autenticacao";
+  let headline = "Não conectou: a API TopSul não aceitou o token ou o segredo. A renovação continua pendente e nenhum crédito foi consumido.";
+  if (result.status === 401 || result.status === 403) {
+    classification = "credencial_recusada";
+    headline = `Não conectou: a API TopSul recusou a credencial (HTTP ${result.status}). Confira o token e o segredo salvos na integração. A renovação continua pendente e nenhum crédito foi consumido.`;
+  } else if (result.status === 404) {
+    classification = "base_ou_caminho_errado";
+    headline = "Não conectou: a API TopSul respondeu HTTP 404. A base provavelmente leva a um endereço sem o caminho /topsul/profile. A renovação continua pendente e nenhum crédito foi consumido.";
+  } else if (result.status === 400) {
+    classification = "http_400_formato_ou_campo";
+    headline = "Não conectou: a API TopSul respondeu HTTP 400. Isso é erro de formato/campo da chamada (corpo ou campo esperado), não prova de token errado. A renovação continua pendente e nenhum crédito foi consumido.";
+  } else if (result.status >= 500) {
+    classification = "erro_servidor_painel";
+    headline = `Não conectou: a API TopSul respondeu erro interno (HTTP ${result.status}). Isso é falha do lado do painel neste momento. A renovação continua pendente e nenhum crédito foi consumido.`;
+  } else if (result.status === 429) {
+    classification = "limite_de_tentativas";
+    headline = "Não conectou: a API TopSul respondeu HTTP 429 (muitas tentativas). Espere alguns minutos antes de testar de novo. A renovação continua pendente e nenhum crédito foi consumido.";
+  }
+  return { connected: false, detail: headline, diagnostic: makeDiagnostic(classification, headline, [attempt]) };
+}
+
+// Renova o usuário exato na API TopSul: POST
+// /topsul/renew_client/{token} com {"secret","username","month"}.
+// PROVISÓRIO (resposta sem formato documentado): HTTP 2xx sem
+// marcador de erro no corpo conta como renovado; corpo vazio conta
+// como renovado (não há marcador possível); corpo não-JSON e
+// não-vazio, ou com marcador de erro, fica pendente. Nunca repete a
+// chamada automaticamente. Nenhum crédito é dado como consumido
+// quando a renovação fica pendente.
+async function topsulRenewClient(
+  creds: TopsulCreds,
+  args: { iptvUser: string; days: number },
+): Promise<{ ok: boolean; detail: string }> {
+  if (args.days <= 0 || args.days % 30 !== 0) {
+    return {
+      ok: false,
+      detail: `A renovação TopSul pede a duração em meses inteiros, e o plano tem ${args.days} dias — que não é múltiplo de 30. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  const base = inspectTopsulApiBase(creds.apiBase);
+  if (!base.valid) return { ok: false, detail: `A base da API TopSul está inválida: ${base.error}` };
+  if (!creds.token || !creds.secret) {
+    return {
+      ok: false,
+      detail: "A integração TopSul está sem token ou segredo salvos. Preencha os dois na aba Integrações e teste a conexão antes de renovar. Nada foi renovado no painel e nenhum crédito foi consumido.",
+    };
+  }
+  const months = args.days / 30;
+  const url = `${base.normalized}/topsul/renew_client/${encodeURIComponent(creds.token)}`;
+  const result = await topsulPost(url, { secret: creds.secret, username: args.iptvUser, month: months }, 20000);
+  if (result.kind === "network") {
+    if (result.cert) {
+      return { ok: false, detail: `A extensão no painel TopSul não foi concluída: ${TOPSUL_CERT_DETAIL}` };
+    }
+    return {
+      ok: false,
+      detail: `Não foi possível alcançar a API TopSul para renovar o usuário ${args.iptvUser}: ${sanitizePanelResponseBody(result.message, [creds.token, creds.secret], 300)}. Nada foi dado como renovado.`,
+    };
+  }
+  const shownBody = sanitizePanelResponseBody(result.body, [creds.token, creds.secret], 500);
+  const failureMessage = panelResponseFailureMessage(result.body);
+  const trimmed = result.body.trim();
+  let unparseable = false;
+  if (trimmed) {
+    try {
+      JSON.parse(trimmed);
+    } catch {
+      unparseable = true;
+    }
+  }
+  if (result.status >= 200 && result.status < 300 && !failureMessage && !unparseable) {
+    return {
+      ok: true,
+      detail: `A API TopSul aceitou a renovação (HTTP ${result.status}) do usuário ${args.iptvUser} por ${months} mês(es).${shownBody ? ` Resposta da API: ${shownBody}` : ""}`,
+    };
+  }
+  const reason = failureMessage
+    ? ` — ${failureMessage}`
+    : unparseable
+      ? " — a resposta veio em formato que o gestor não conseguiu ler"
+      : "";
+  return {
+    ok: false,
+    detail: `A API TopSul não concluiu a renovação do usuário ${args.iptvUser}: HTTP ${result.status}${reason}. ${shownBody ? `Resposta da API: ${shownBody}. ` : ""}Nada foi dado como renovado.`,
+  };
+}
+
+// Resolve as credenciais TopSul de um servidor pela integração
+// vinculada a ele (panelIntegrationId). O token e o segredo ficam
+// SÓ na integração — nunca são copiados para o servidor nem
+// devolvidos para a tela.
+async function resolveTopsulCreds(
+  ctx: Ctx,
+  server: typeof schema.servers.$inferSelect,
+): Promise<TopsulCreds | null> {
+  if (server.panelIntegrationId == null) return null;
+  const db = ctx.db<typeof schema>();
+  const rows = await db
+    .select()
+    .from(schema.integrations)
+    .where(eq(schema.integrations.id, server.panelIntegrationId));
+  const integration = rows[0];
+  if (!integration || integration.ownerId !== server.ownerId) return null;
+  if ((integration.provider ?? "wplay") !== "topsul") return null;
+  return {
+    apiBase: resolveTopsulApiBase(integration.apiBase ?? ""),
+    token: integration.apiToken ?? "",
+    secret: integration.apiSecret ?? "",
+  };
+}
+
 
 // ---------------- WhatsApp por QR Code (único caminho) ----------------
 // O pareamento é feito pelo serviço de sessão interno do gestor
@@ -1508,7 +1934,7 @@ async function panelExtendForClient(
           },
         };
       }
-      if ((linked.provider ?? "wplay") !== "wplay") {
+      if (!isSupportedPanelProvider(linked.provider ?? "wplay")) {
         return {
           panelServer: null,
           extend: {
@@ -1516,6 +1942,40 @@ async function panelExtendForClient(
             detail: `A integração “${linked.name}” vinculada ao servidor “${own.name}” usa um provedor de painel que foi removido do gestor. A renovação fica pendente e nenhum crédito foi consumido. Vincule uma integração WPlay a este servidor para voltar a renovar automaticamente.`,
           },
         };
+      }
+      // TopSul vinculada: as credenciais (token + segredo) ficam na
+      // integração e o teste de conexão dela é o que vale — o
+      // servidor não guarda token próprio neste modelo.
+      if ((linked.provider ?? "wplay") === "topsul") {
+        if (!linked.apiToken || !linked.apiSecret) {
+          return {
+            panelServer: own,
+            extend: {
+              ok: false,
+              detail: `A integração TopSul “${linked.name}” está sem token ou segredo salvos. Preencha os dois na aba Integrações e toque em “Testar conexão”. Nada foi renovado e nenhum crédito foi consumido.`,
+            },
+          };
+        }
+        if (linked.status !== "ativo") {
+          return {
+            panelServer: own,
+            extend: {
+              ok: false,
+              detail: `A integração TopSul “${linked.name}” ainda não passou no teste de conexão. Toque em “Testar conexão” no cartão dela (aba Integrações) até passar — a renovação fica pendente e nenhum crédito foi consumido.`,
+            },
+          };
+        }
+        const topsulCreds: TopsulCreds = {
+          apiBase: resolveTopsulApiBase(linked.apiBase ?? ""),
+          token: linked.apiToken,
+          secret: linked.apiSecret,
+        };
+        const extend = await panelExtendUser(
+          { ...own, panelProvider: "topsul" },
+          { iptvUser: client.iptvUser, iptvPass: client.iptvPass, days },
+          topsulCreds,
+        );
+        return { panelServer: own, extend };
       }
       if (!own.apiToken || own.apiVerified !== 1) {
         return {
@@ -1548,7 +2008,27 @@ async function panelExtendForClient(
     // link do painel. Se a API responder erro (ex.: HTTP 400) ou
     // exigir um token que não está salvo, a extensão volta como
     // pendente com o motivo — nada é dado como renovado e nenhum
-    // crédito é consumido.
+    // crédito é consumido. Servidor TopSul (provedor vindo de um
+    // vínculo anterior) resolve as credenciais na integração
+    // vinculada, sem copiar segredo para o servidor.
+    if ((own.panelProvider ?? "wplay") === "topsul") {
+      const topsulCreds = await resolveTopsulCreds(ctx, own);
+      if (!topsulCreds || !topsulCreds.token || !topsulCreds.secret) {
+        return {
+          panelServer: own,
+          extend: {
+            ok: false,
+            detail: `O servidor “${own.name}” usa TopSul, mas nenhuma integração TopSul com token e segredo está vinculada a ele. Vincule uma integração TopSul em Servidores → Editar. Nada foi renovado e nenhum crédito foi consumido.`,
+          },
+        };
+      }
+      const extend = await panelExtendUser(own, {
+        iptvUser: client.iptvUser,
+        iptvPass: client.iptvPass,
+        days,
+      }, topsulCreds);
+      return { panelServer: own, extend };
+    }
     const effective = { ...own, apiBase: own.apiBase || own.panelUrl };
     const extend = await panelExtendUser(effective, {
       iptvUser: client.iptvUser,
@@ -1568,11 +2048,27 @@ async function panelExtendForClient(
       },
     };
   }
+  // Servidor de reserva TopSul: as credenciais vêm da integração
+  // vinculada a ele; sem elas, a extensão fica pendente.
+  const fallbackCreds =
+    (panelServer.panelProvider ?? "wplay") === "topsul"
+      ? await resolveTopsulCreds(ctx, panelServer)
+      : null;
+  if ((panelServer.panelProvider ?? "wplay") === "topsul" && !fallbackCreds) {
+    return {
+      panelServer,
+      extend: {
+        ok: false,
+        detail:
+          "O servidor de reserva usa TopSul, mas nenhuma integração TopSul com token e segredo está vinculada a ele. Vincule uma integração TopSul em Servidores → Editar. Nada foi renovado e nenhum crédito foi consumido.",
+      },
+    };
+  }
   const extend = await panelExtendUser(panelServer, {
     iptvUser: client.iptvUser,
     iptvPass: client.iptvPass,
     days,
-  });
+  }, fallbackCreds);
   return { panelServer, extend };
 }
 
@@ -2006,6 +2502,7 @@ const stateResponse = z.object({
       hasPass: z.boolean(),
       apiBase: z.string(),
       hasApiToken: z.boolean(),
+      hasApiSecret: z.boolean(),
       status: z.string(),
       testDetail: z.string(),
       testedAt: z.string().nullable(),
@@ -2193,7 +2690,7 @@ const BACKUP_DATE_FIELDS: Record<string, string[]> = {
 const BACKUP_COLUMNS: Record<string, string[]> = {
   account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
   servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "browserLocateDiagnostic", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
-  integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
+  integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "apiSecret", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
   serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
   plans: ["name", "days", "priceCents", "createdAt"],
   clients: ["name", "whatsapp", "iptvUser", "iptvPass", "serverId", "planId", "priceOverrideCents", "expiresAt", "status", "isTest", "referredBy", "app", "device", "screens", "source", "extraPanel", "listState", "invoiceToken", "createdAt"],
@@ -2390,13 +2887,13 @@ export const Actions = {
           loadPanelStatus(ctx, ownerId),
         ]);
       const serverById = new Map<number, typeof schema.servers.$inferSelect>(serverRows.map((x) => [x.id, x]));
-      // Mapa só dos servidores visíveis (WPlay): o nome exibido do
-      // servidor de um cliente deve ser um servidor que existe na tela
-      // de Servidores. Cliente ligado a servidor apagado ou oculto
-      // (provedor removido) mostra "Servidor removido", não um nome
-      // de um servidor que a dona não vê mais.
+      // Mapa só dos servidores visíveis (WPlay e TopSul): o nome
+      // exibido do servidor de um cliente deve ser um servidor que
+      // existe na tela de Servidores. Cliente ligado a servidor
+      // apagado ou oculto (provedor removido) mostra "Servidor
+      // removido", não um nome de um servidor que a dona não vê mais.
       const visibleServerById = new Map<number, typeof schema.servers.$inferSelect>(
-        serverRows.filter((x) => (x.panelProvider ?? "wplay") === "wplay").map((x) => [x.id, x]),
+        serverRows.filter((x) => isSupportedPanelProvider(x.panelProvider ?? "wplay")).map((x) => [x.id, x]),
       );
       const planById = new Map<number, typeof schema.plans.$inferSelect>(planRows.map((x) => [x.id, x]));
       const invoiceTokens = await ensureInvoiceTokens(ctx, clientRows);
@@ -2455,7 +2952,7 @@ export const Actions = {
       }
       return {
         servers: serverRows
-          .filter((x) => (x.panelProvider ?? "wplay") === "wplay")
+          .filter((x) => isSupportedPanelProvider(x.panelProvider ?? "wplay"))
           .map((x) => ({
           id: x.id,
           name: x.name,
@@ -2626,7 +3123,7 @@ export const Actions = {
           active: c.active === 1,
         })),
         integrations: integrationRows
-          .filter((x) => (x.provider ?? "wplay") === "wplay")
+          .filter((x) => isSupportedPanelProvider(x.provider ?? "wplay"))
           .map((x) => ({
           id: x.id,
           provider: x.provider,
@@ -2636,6 +3133,7 @@ export const Actions = {
           hasPass: x.panelPass.length > 0,
           apiBase: x.apiBase ?? "",
           hasApiToken: x.apiToken.length > 0,
+          hasApiSecret: (x.apiSecret ?? "").length > 0,
           status: x.status,
           testDetail: x.testDetail,
           testedAt: x.testedAt ? new Date(x.testedAt).toISOString() : null,
@@ -2901,8 +3399,8 @@ export const Actions = {
           throw new Error("Integração de painel não encontrada nesta conta.");
         }
         linkedProvider = intRows[0].provider ?? "wplay";
-        if (linkedProvider !== "wplay") {
-          throw new Error("Esta integração usa um provedor de painel que foi removido do gestor. Vincule uma integração WPlay.");
+        if (!isSupportedPanelProvider(linkedProvider)) {
+          throw new Error("Esta integração usa um provedor de painel que foi removido do gestor. Vincule uma integração WPlay ou TopSul.");
         }
       }
 
@@ -3159,7 +3657,7 @@ export const Actions = {
         : [];
       const linked = linkedRows[0];
       const provider = linked?.provider ?? server.panelProvider ?? "wplay";
-      if (provider !== "wplay") {
+      if (!isSupportedPanelProvider(provider)) {
         const detail =
           "Este servidor usa um provedor de painel que foi removido do gestor a pedido da dona. A renovação automática não funciona mais por ele; cadastre o painel como servidor WPlay (link, usuário e senha) para voltar a renovar automaticamente. Nada foi renovado e nenhum crédito foi consumido.";
         return {
@@ -3179,6 +3677,57 @@ export const Actions = {
             steps: [],
           },
         };
+      }
+      // TopSul: o teste chama o perfil da API TopSul com o token e o
+      // segredo guardados na integração vinculada. O resultado espelha
+      // no servidor (apiVerified, usado pelo cartão) E na integração
+      // (status, usado pela renovação) — os dois passam a valer juntos.
+      if (provider === "topsul") {
+        const topsulCreds = await resolveTopsulCreds(ctx, server);
+        if (!topsulCreds) {
+          const detail =
+            "Este servidor usa TopSul, mas nenhuma integração TopSul está vinculada a ele. Vincule uma integração TopSul em Servidores → Editar e toque em “Testar conexão” de novo. Nada foi renovado e nenhum crédito foi consumido.";
+          return {
+            connected: false,
+            detail,
+            diagnostic: {
+              testedAt: new Date().toISOString(),
+              endpoint: "",
+              baseOriginal: "",
+              baseNormalized: "",
+              baseWarnings: [],
+              classification: "sem_credencial",
+              headline: detail,
+              winningVariant: "",
+              responseBody: "",
+              attempts: [],
+              steps: [
+                "Vincule uma integração TopSul a este servidor em Servidores → Editar, com token e segredo salvos na integração.",
+              ],
+            },
+          };
+        }
+        const result = await topsulTestConnection(topsulCreds);
+        await db
+          .update(schema.servers)
+          .set({
+            apiVerified: result.connected ? 1 : 0,
+            apiStatusDetail: result.detail,
+            apiDiagnostic: JSON.stringify(result.diagnostic),
+          })
+          .where(eq(schema.servers.id, server.id));
+        if (server.panelIntegrationId != null) {
+          await db
+            .update(schema.integrations)
+            .set({
+              status: result.connected ? "ativo" : "falhou",
+              testDetail: result.detail,
+              testedAt: Date.now(),
+            })
+            .where(eq(schema.integrations.id, server.panelIntegrationId));
+        }
+        ctx.invalidateQueries();
+        return { connected: result.connected, detail: result.detail, diagnostic: result.diagnostic };
       }
       // A API pede usuário e senha do painel: o teste envia os salvos
       // neste servidor (e o token, se houver). A base da API já vem
@@ -3238,7 +3787,7 @@ export const Actions = {
             .where(eq(schema.integrations.id, server.panelIntegrationId))
         : [];
       const gateProvider = linkedGateRows[0]?.provider ?? server.panelProvider ?? "wplay";
-      if (gateProvider !== "wplay") {
+      if (!isSupportedPanelProvider(gateProvider)) {
         return {
           extended: false,
           detail:
@@ -3246,7 +3795,31 @@ export const Actions = {
           newExpiresAt: null,
         };
       }
-      if (server.apiVerified !== 1) {
+      // TopSul: vale o teste de conexão da integração (status) ou o
+      // teste do cartão do servidor (apiVerified) — os dois espelham
+      // o mesmo resultado. Sem nenhum dos dois, o teste é recusado
+      // antes de qualquer chamada que renove de verdade.
+      let topsulCreds: TopsulCreds | null = null;
+      if (gateProvider === "topsul") {
+        topsulCreds = await resolveTopsulCreds(ctx, server);
+        const linkedStatus = linkedGateRows[0]?.status;
+        if (server.apiVerified !== 1 && linkedStatus !== "ativo") {
+          return {
+            extended: false,
+            detail:
+              "Antes do teste de extensão, toque em “Testar conexão” até a API TopSul passar (no cartão do servidor ou no cartão da integração). Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
+            newExpiresAt: null,
+          };
+        }
+        if (!topsulCreds || !topsulCreds.token || !topsulCreds.secret) {
+          return {
+            extended: false,
+            detail:
+              "A integração TopSul vinculada a este servidor está sem token ou segredo salvos. Preencha os dois na aba Integrações e teste a conexão. Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
+            newExpiresAt: null,
+          };
+        }
+      } else if (server.apiVerified !== 1) {
         return {
           extended: false,
           detail:
@@ -3269,12 +3842,13 @@ export const Actions = {
       }
       // O servidor como está: no vínculo, link/usuário/senha da
       // integração já foram copiados para o servidor ao vincular.
+      // TopSul resolve token/segredo na integração vinculada.
       const effectiveServer = server;
       const result = await panelExtendUser(effectiveServer, {
         iptvUser: client.iptvUser,
         iptvPass: client.iptvPass,
         days: plan.days,
-      });
+      }, topsulCreds);
       if (!result.ok) {
         await db
           .update(schema.servers)
@@ -5672,19 +6246,20 @@ export const Actions = {
     },
   }),
 
-  // ---------------- Integrações de painéis IPTV (WPlay) ----------------
+  // ---------------- Integrações de painéis IPTV (WPlay e TopSul) ----------------
 
   saveIntegration: defineAction({
     request: z.object({
       session: sessionField,
       id: z.number().int().positive().optional(),
-      provider: z.enum(["wplay"]).optional(),
+      provider: z.enum(["wplay", "topsul"]).optional(),
       name: z.string().min(1).max(120),
       url: z.string().min(1).max(500).optional(),
       panelUser: z.string().max(200).optional(),
       panelPass: z.string().max(300).optional(),
       apiBase: z.string().max(500).optional(),
       apiToken: z.string().max(500).optional(),
+      apiSecret: z.string().max(500).optional(),
     }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
@@ -5702,12 +6277,53 @@ export const Actions = {
         // O provedor é fixo desde a criação. Integrações de um
         // provedor removido não podem ser editadas: exclua a
         // integração e crie uma nova do painel atual.
-        if ((existing.provider ?? "wplay") !== "wplay") {
-          throw new Error("Esta integração usa um provedor de painel que foi removido do gestor. Exclua ela e crie uma integração WPlay nova.");
+        if (!isSupportedPanelProvider(existing.provider ?? "wplay")) {
+          throw new Error("Esta integração usa um provedor de painel que foi removido do gestor. Exclua ela e crie uma integração WPlay ou TopSul nova.");
         }
         let url = (args.url ?? existing.url).trim();
         if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
         url = url.replace(/\/+$/, "");
+        // TopSul: a edição também aceita base da API, token e
+        // segredo — em branco, mantém o valor salvo. Se qualquer
+        // credencial mudar, o teste anterior deixa de valer.
+        if ((existing.provider ?? "wplay") === "topsul") {
+          const baseRaw = args.apiBase !== undefined ? args.apiBase.trim() : (existing.apiBase ?? "");
+          const baseCheck = inspectTopsulApiBase(resolveTopsulApiBase(baseRaw));
+          if (!baseCheck.valid) {
+            throw new Error(`Base da API TopSul inválida: ${baseCheck.error}`);
+          }
+          const token = args.apiToken !== undefined && args.apiToken.trim()
+            ? args.apiToken.trim()
+            : (existing.apiToken ?? "");
+          const secret = args.apiSecret !== undefined && args.apiSecret.trim()
+            ? args.apiSecret.trim()
+            : (existing.apiSecret ?? "");
+          const credsChanged =
+            token !== (existing.apiToken ?? "") ||
+            secret !== (existing.apiSecret ?? "") ||
+            baseCheck.normalized !== resolveTopsulApiBase(existing.apiBase ?? "");
+          await db
+            .update(schema.integrations)
+            .set({
+              name: args.name.trim(),
+              url,
+              panelUser: (args.panelUser ?? existing.panelUser).trim(),
+              panelPass: args.panelPass ? args.panelPass : existing.panelPass,
+              apiBase: baseCheck.normalized,
+              apiToken: token,
+              apiSecret: secret,
+              ...(credsChanged
+                ? {
+                    status: "nao_testado",
+                    testDetail:
+                      "Token, segredo ou base da API alterados. Toque em “Testar conexão” para validar de novo — a renovação fica pendente até o teste passar.",
+                  }
+                : {}),
+            })
+            .where(eq(schema.integrations.id, args.id));
+          ctx.invalidateQueries();
+          return { id: args.id };
+        }
         await db
           .update(schema.integrations)
           .set({
@@ -5727,6 +6343,36 @@ export const Actions = {
       let url = args.url.trim();
       if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
       url = url.replace(/\/+$/, "");
+      const provider = args.provider ?? "wplay";
+      // TopSul: exige token e segredo já na criação; a base vem
+      // preenchida com o endereço padrão da API quando vazia.
+      if (provider === "topsul") {
+        if (!args.apiToken?.trim() || !args.apiSecret?.trim()) {
+          throw new Error("Informe o token e o segredo da API TopSul.");
+        }
+        const baseCheck = inspectTopsulApiBase(resolveTopsulApiBase(args.apiBase ?? ""));
+        if (!baseCheck.valid) {
+          throw new Error(`Base da API TopSul inválida: ${baseCheck.error}`);
+        }
+        const inserted = await db
+          .insert(schema.integrations)
+          .values({
+            ownerId,
+            provider: "topsul",
+            name: args.name.trim(),
+            url,
+            panelUser: args.panelUser.trim(),
+            panelPass: args.panelPass,
+            apiBase: baseCheck.normalized,
+            apiToken: args.apiToken.trim(),
+            apiSecret: args.apiSecret.trim(),
+          })
+          .returning({ id: schema.integrations.id });
+        const row = inserted[0];
+        if (!row) throw new Error("saveIntegration: insert returned no rows");
+        ctx.invalidateQueries();
+        return { id: row.id };
+      }
       const inserted = await db
         .insert(schema.integrations)
         .values({
@@ -5798,8 +6444,25 @@ export const Actions = {
       }
       // Provedor removido: o teste é recusado com o motivo em
       // linguagem simples, sem chamar nada.
-      if ((integration.provider ?? "wplay") !== "wplay") {
-        return { status: "falhou", detail: "Esta integração usa um provedor de painel que foi removido do gestor. Exclua ela e crie uma integração WPlay nova." };
+      if (!isSupportedPanelProvider(integration.provider ?? "wplay")) {
+        return { status: "falhou", detail: "Esta integração usa um provedor de painel que foi removido do gestor. Exclua ela e crie uma integração WPlay ou TopSul nova." };
+      }
+      // TopSul: o teste chama o perfil da API TopSul com o token e o
+      // segredo salvos — é o mesmo teste do cartão do servidor
+      // vinculado, e o resultado vale para os dois.
+      if ((integration.provider ?? "wplay") === "topsul") {
+        const result = await topsulTestConnection({
+          apiBase: resolveTopsulApiBase(integration.apiBase ?? ""),
+          token: integration.apiToken ?? "",
+          secret: integration.apiSecret ?? "",
+        });
+        const status = result.connected ? "ativo" : "falhou";
+        await db
+          .update(schema.integrations)
+          .set({ status, testDetail: result.detail, testedAt: Date.now() })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { status, detail: result.detail };
       }
       const probe = await probePanelUrl(integration.url);
       let loginNote = "";
@@ -5841,6 +6504,19 @@ export const Actions = {
       if (!integration || integration.ownerId !== ownerId) {
         throw new Error("Integração não encontrada nesta conta.");
       }
+      // TopSul não tem "Info Painel" nem sincronização de IDs: esses
+      // botões leem a API Xtream do painel WPlay. A TopSul usa só o
+      // teste de conexão (perfil) e a renovação.
+      if ((integration.provider ?? "wplay") === "topsul") {
+        const info =
+          "Integração TopSul: use “Testar conexão” para validar o token e o segredo com a API TopSul. Informações do painel e sincronização de IDs são recursos do painel WPlay e não existem nesta integração.";
+        await db
+          .update(schema.integrations)
+          .set({ panelInfo: info })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { info };
+      }
       const probe = await probePanelUrl(integration.url);
       const info = probe.reachable
         ? [
@@ -5880,6 +6556,16 @@ export const Actions = {
       const integration = rows[0];
       if (!integration || integration.ownerId !== ownerId) {
         throw new Error("Integração não encontrada nesta conta.");
+      }
+      if ((integration.provider ?? "wplay") === "topsul") {
+        const detail =
+          "A sincronização de IDs é um recurso do painel WPlay e não existe na integração TopSul. O vínculo e o teste de conexão continuam valendo; a renovação automática usa o token e o segredo salvos.";
+        await db
+          .update(schema.integrations)
+          .set({ syncDetail: detail, syncedAt: Date.now() })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { detail, synced: false };
       }
       const xtream = await probeXtreamApi(integration.url, integration.panelUser, integration.panelPass);
       let detail: string;
@@ -5929,8 +6615,8 @@ export const Actions = {
       if (!server || server.ownerId !== ownerId) {
         throw new Error("Servidor não encontrado nesta conta.");
       }
-      if ((integration.provider ?? "wplay") !== "wplay") {
-        throw new Error("Esta integração usa um provedor de painel que foi removido do gestor e não pode ser vinculada. Exclua ela e crie uma integração WPlay nova.");
+      if (!isSupportedPanelProvider(integration.provider ?? "wplay")) {
+        throw new Error("Esta integração usa um provedor de painel que foi removido do gestor e não pode ser vinculada. Exclua ela e crie uma integração WPlay ou TopSul nova.");
       }
       await db
         .update(schema.servers)
