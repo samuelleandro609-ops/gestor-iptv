@@ -23,12 +23,12 @@
    o mesmo visual vale no claro e no escuro do aparelho. */
 :root {
   color-scheme: dark;
-  --bg: #050d1d;
-  --surface: #0a1a33;
+  --bg: #03091a;
+  --surface: #071426;
   --surface2: #0f2547;
   --text: #eaf3fc;
   --dim: #93a9c4;
-  --border: #1e3a5c;
+  --border: #162e4b;
   --accent: #14b3d0;
   --accent-strong: #3ecfe8;
   --accent-bright: #2ecbe8;

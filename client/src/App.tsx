@@ -658,22 +658,22 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
       {/* Fundo da fatura: imagem de filmes em tela cheia, com leve
           desfoque para o texto continuar legível e os cartazes ainda
           visíveis por baixo da cor do tema. Só no celular (max-sm):
-          desfoque e véu mais fortes e mais respiro, para a imagem
-          parecer mais afastada; no PC o visual não muda. */}
+          desfoque menor, véu mais leve e mais respiro no topo, para a imagem
+          ficar mais à mostra sem ficar em cima das informações; no PC o visual não muda. */}
       <div className="absolute inset-0" aria-hidden="true">
         <img
           src={invoiceBg}
           alt=""
-          className="h-full w-full object-cover [filter:blur(5px)_brightness(0.62)] max-sm:[filter:blur(14px)_brightness(0.42)]"
+          className="h-full w-full object-cover [filter:blur(5px)_brightness(0.62)] max-sm:[filter:blur(3px)_brightness(0.78)]"
           style={{ transform: "scale(1.07)" }}
         />
         <div
-          className="absolute inset-0 opacity-[0.52] max-sm:opacity-[0.8]"
+          className="absolute inset-0 opacity-[0.52] max-sm:opacity-[0.35]"
           style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)` }}
         />
       </div>
       <SafeAreaTopScrim backgroundColor={theme.dark} />
-      <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8 max-sm:px-6 max-sm:pt-12">
+      <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8 max-sm:px-6 max-sm:pt-16">
         <p className="text-center text-sm font-semibold uppercase tracking-widest text-white/80">
           {invoice.serverName ?? "Assinatura Gestor Flex"}
         </p>
@@ -1920,7 +1920,7 @@ function ClientsTab({
               </span>
             </div>
             <p className="mt-2 text-sm font-bold" style={{ color: card.color }}>{brl(card.value)}</p>
-            <p className="text-xs text-[var(--dim)]">{card.hint}</p>
+            <p className="text-[13px] font-medium text-[var(--dim)]">{card.hint}</p>
           </div>
         ))}
       </div>
@@ -2056,7 +2056,7 @@ function ClientsTab({
               );
             })}
           </ul>
-          <p className="mt-2 text-xs text-[var(--dim)]">
+          <p className="mt-2 text-[13px] font-medium text-[var(--dim)]">
             O texto e os dias de aviso são editáveis em Integrações → Mensagens e Ajustes.
             O WhatsApp é conectado pelo QR Code, na aba WhatsApp. O botão de
             cada cliente abre o WhatsApp com a mensagem pronta para você confirmar o envio.
@@ -2099,7 +2099,7 @@ function ClientsTab({
                         </span>
                       )}
                     </p>
-                    <p className="font-mono text-xs text-[var(--dim)]">{c.iptvUser}</p>
+                    <p className="font-mono text-[13px] font-medium text-[var(--dim)]">{c.iptvUser}</p>
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">{c.whatsapp ? c.whatsapp : "—"}</td>
                   <td className="px-4 py-3">{c.planName ?? "—"}</td>
@@ -2380,7 +2380,7 @@ function SendMessageModal({
               <option value="conectado">Dispositivo conectado</option>
             )}
           </select>
-          <p className="mt-1 text-xs text-[var(--dim)]">
+          <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
             {connected
               ? "O envio sai automaticamente pelo WhatsApp conectado por QR Code, direto para o número deste cliente."
               : "O WhatsApp não está conectado agora. Você pode montar a mensagem, mas o envio só acontece com o WhatsApp conectado (aba WhatsApp)."}
@@ -2432,7 +2432,7 @@ function SendMessageModal({
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
               />
-              <p className="text-xs text-[var(--dim)]">Use {"{nome}"}, {"{vencimento}"}, {"{plano}"}, {"{valor}"} e {"{link}"} — eles viram os dados deste cliente na hora do envio.</p>
+              <p className="text-[13px] font-medium text-[var(--dim)]">Use {"{nome}"}, {"{vencimento}"}, {"{plano}"}, {"{valor}"} e {"{link}"} — eles viram os dados deste cliente na hora do envio.</p>
               {editError && <p className="text-sm text-[var(--danger)]">{editError}</p>}
               <div className="flex flex-wrap gap-2">
                 <button type="button" className={btnPrimary} disabled={saveTemplate.isPending || !editText.trim()} onClick={() => saveTemplate.mutate()}>
@@ -2445,7 +2445,7 @@ function SendMessageModal({
             </div>
           )}
           {!editing && (
-            <p className="mt-1 text-xs text-[var(--dim)]">
+            <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
               Toque no lápis para editar este modelo aqui mesmo; ele também fica salvo na aba Mensagens.
             </p>
           )}
@@ -2859,7 +2859,7 @@ function PlansTab({ data, onNavigate }: { data: State; onNavigate: (tab: Tab) =>
                 <p className="mt-1 font-display text-3xl font-extrabold leading-none" style={{ color: card.color }}>
                   {card.count}
                 </p>
-                <p className="mt-1.5 text-xs text-[var(--dim)]">{card.hint}</p>
+                <p className="mt-1.5 text-[13px] font-medium text-[var(--dim)]">{card.hint}</p>
               </div>
             ))}
           </div>
@@ -3120,7 +3120,7 @@ function PanelDiagnosticView({ diagnostic }: { diagnostic: PanelDiagnostic | nul
           </ol>
         </div>
       )}
-      <p className="mt-3 text-xs text-[var(--dim)]">
+      <p className="mt-3 text-[13px] font-medium text-[var(--dim)]">
         Teste feito em {new Date(diagnostic.testedAt).toLocaleString("pt-BR")}. Este teste só autentica: ele não renova cliente e não consome crédito.
       </p>
     </div>
@@ -3381,7 +3381,7 @@ function ServersTab({ data }: { data: State }) {
                 <div className="rounded-xl bg-[var(--surface2)] p-3">
                   <p className="text-xs font-bold uppercase tracking-wide text-[var(--dim)]">Custo/créd.</p>
                   <p className="mt-0.5 font-display text-2xl font-extrabold">{brl(s.costPerCreditCents)}</p>
-                  {s.chargeByScreens && <p className="text-xs text-[var(--dim)]">cobrança por telas</p>}
+                  {s.chargeByScreens && <p className="text-[13px] font-medium text-[var(--dim)]">cobrança por telas</p>}
                 </div>
               </div>
 
@@ -4877,7 +4877,7 @@ function WhatsAppTab({ data }: { data: State }) {
                 )}
               </div>
             </div>
-            <p className="text-xs text-[var(--dim)]">
+            <p className="text-[13px] font-medium text-[var(--dim)]">
               Preferências salvas neste gestor para o dispositivo conectado.
               {prefsMsg ? ` ${prefsMsg}` : ""}
             </p>
@@ -5593,14 +5593,14 @@ function DashboardTab({
             {card.value != null && (
               <span className="mt-1.5 block text-sm font-semibold text-[var(--text)]">{money(card.value)}</span>
             )}
-            <span className="mt-0.5 block text-xs text-[var(--dim)]">{card.hint}</span>
+            <span className="mt-0.5 block text-[13px] font-medium text-[var(--dim)]">{card.hint}</span>
           </button>
         ))}
       </div>
 
       <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <h3 className="font-display text-lg font-bold">$ Receita x Custo</h3>
-        <p className="mt-1 text-sm text-[var(--dim)]">
+        <p className="mt-1 text-sm font-medium text-[var(--dim)]">
           Receita: pagamentos reais aprovados no Mercado Pago. Custo: despesas que você lança em Transações
           + custo dos créditos das renovações aplicadas (custo por crédito do servidor × créditos do plano,
           multiplicado pelas telas do cliente quando o servidor cobra por telas). Lucro = receita − custo.
@@ -5615,11 +5615,11 @@ function DashboardTab({
                 <p className="font-display font-bold">$ {period.label}</p>
                 <dl className="mt-3 space-y-2 text-sm">
                   <div className="flex items-center justify-between">
-                    <dt className="text-[var(--dim)]">↗ Receita</dt>
+                    <dt className="font-medium text-[var(--dim)]">↗ Receita</dt>
                     <dd className="font-bold text-[var(--card-green)]">{money(receita)}</dd>
                   </div>
                   <div className="flex items-center justify-between">
-                    <dt className="text-[var(--dim)]">↘ Custo</dt>
+                    <dt className="font-medium text-[var(--dim)]">↘ Custo</dt>
                     <dd className="font-bold text-[var(--card-red)]">{money(custo)}</dd>
                   </div>
                   <div className="flex items-center justify-between border-t border-[var(--border)] pt-2">
@@ -5660,7 +5660,7 @@ function DashboardTab({
                             {c.name}
                             {c.isTest && <span className="ml-2 rounded-full bg-[var(--surface)] px-2 py-0.5 text-xs font-bold">TESTE</span>}
                           </p>
-                          <p className="text-sm text-[var(--dim)]">
+                          <p className="text-sm font-medium text-[var(--dim)]">
                             {c.planName ?? "Sem plano"} • {money(c.effectivePriceCents)} •{" "}
                             {left < 0 ? `venceu em ${fmtDate(c.expiresAt)}` : left === 0 ? "vence hoje" : `vence ${fmtDate(c.expiresAt)}`}
                           </p>
@@ -6889,7 +6889,7 @@ function HostingSection({ data }: { data: State }) {
           inputMode="url"
           autoComplete="off"
         />
-        <p className="mt-1 text-xs text-[var(--dim)]">
+        <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
           É o endereço que o Render mostra na página do seu serviço (termina em .onrender.com). Salvando aqui,
           todos os links de fatura — no botão Fatura, em Enviar mensagem e nas mensagens da aba Mensagens —
           passam a usar este endereço na hora.
@@ -6983,7 +6983,7 @@ function HostingSection({ data }: { data: State }) {
             </button>
           </details>
         ))}
-        <p className="text-xs text-[var(--dim)]">
+        <p className="text-[13px] font-medium text-[var(--dim)]">
           Estes mesmos arquivos acompanham esta versão do gestor: render.yaml, Dockerfile, .env.example e o guia
           HOSPEDAGEM-RENDER.md estão na raiz do projeto e também na pasta hospedagem-render. Eles não contêm
           nenhum segredo: os valores reais das variáveis ficam só no painel do Render.
