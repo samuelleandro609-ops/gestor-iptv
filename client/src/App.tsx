@@ -336,7 +336,7 @@ function AuthScreen({
     <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--text)]">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
       <main className="w-full max-w-md">
-        <h1 className="text-center font-display text-3xl font-extrabold">Gestor IPTV</h1>
+        <h1 className="text-center font-display text-3xl font-extrabold">Gestor Flex</h1>
         <p className="mt-2 text-center text-sm text-[var(--dim)]">
           Cada conta tem os seus próprios clientes, servidores, planos e WhatsApp.
           Conta nova começa do zero, vazia.
@@ -670,7 +670,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
       <SafeAreaTopScrim backgroundColor={theme.dark} />
       <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8">
         <p className="text-center text-sm font-semibold uppercase tracking-widest text-white/80">
-          {invoice.serverName ?? "Assinatura IPTV"}
+          {invoice.serverName ?? "Assinatura Gestor Flex"}
         </p>
         <h1 className="mt-1 text-center font-display text-2xl font-bold text-white">
           {invoice.invoiceTitle}
@@ -1083,7 +1083,7 @@ function SidebarContent({
   return (
     <>
       <div className={variant === "drawer" ? "px-5 pb-1 pt-6" : "hidden px-5 pb-1 pt-6 lg:block"}>
-        <p className="font-display text-lg font-extrabold leading-tight">Painel de gestão</p>
+        <p className="font-display text-lg font-extrabold leading-tight">Gestor Flex</p>
         <p className="mt-0.5 text-sm text-[var(--dim)]">Visão geral do sistema</p>
         <ul className="mt-4 space-y-1.5" aria-label="Status das integrações">
           {statusDots.map((s) => (
@@ -1264,7 +1264,7 @@ function Manager({
             <path d="M4 7h16M4 12h16M4 17h16" />
           </svg>
         </button>
-        <p className="font-display text-lg font-extrabold leading-tight">Painel de gestão</p>
+        <p className="font-display text-lg font-extrabold leading-tight">Gestor Flex</p>
       </header>
       <aside className="hidden border-b border-[var(--border)] bg-[var(--surface)] lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-72 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
         <SidebarContent
@@ -1505,7 +1505,7 @@ function ClientRenewalDetail({ data, client }: { data: State; client: Client }) 
           Este é o link que vai junto na mensagem. Ele abre a fatura <strong>sem login</strong> — o código
           secreto no fim do link é o que identifica a fatura deste cliente.
           {!data.publicBaseUrl &&
-            " Atenção: o endereço público da hospedagem (Render) ainda não foi salvo em Suporte → Hospedagem, então este link ainda é o endereço do Muse e pede login do Muse para quem abre."}
+            " Atenção: o endereço público da hospedagem (Render) ainda não foi salvo em Administração → Hospedagem, então este link ainda é o endereço do Muse e pede login do Muse para quem abre."}
         </p>
         <p className="mt-2 break-all rounded-lg bg-[var(--surface2)] px-3 py-2 font-mono text-xs">{publicLink}</p>
         <div className="mt-2 flex flex-wrap gap-2">
@@ -6770,7 +6770,7 @@ function PanelsIntegration({ data }: { data: State }) {
 
 const RENDER_DOCS_URL = "https://render.com/docs/free";
 
-const RENDER_YAML = `# Gestor IPTV — deploy no Render (Blueprint)
+const RENDER_YAML = `# Gestor Flex — deploy no Render (Blueprint)
 # No Render: New → Blueprint → conecte o repositório do projeto.
 # NENHUM segredo fica neste arquivo: DATABASE_URL vem do banco
 # criado no Render e SESSION_SECRET é gerado pelo próprio Render.
@@ -6796,7 +6796,7 @@ databases:
     plan: free
 `;
 
-const DOCKERFILE = `# Gestor IPTV — imagem do Web Service no Render
+const DOCKERFILE = `# Gestor Flex — imagem do Web Service no Render
 FROM oven/bun:1
 WORKDIR /app
 COPY package.json bun.lock ./
@@ -7538,7 +7538,7 @@ function AdminTab({ data }: { data: State }) {
               className={inputCls}
               value={resendFrom}
               onChange={(e) => setResendFrom(e.target.value)}
-              placeholder="Gestor IPTV <contato@seudominio.com>"
+              placeholder="Gestor Flex <contato@seudominio.com>"
               autoComplete="off"
             />
           </div>
@@ -7688,6 +7688,8 @@ function AdminTab({ data }: { data: State }) {
           <p className="mt-3 rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{backupMsg}</p>
         )}
       </div>
+
+      <HostingSection data={data} />
     </section>
   );
 }
@@ -7708,7 +7710,27 @@ function SupportTab({
 
       <IntegrationStatus data={data} />
 
-      <HostingSection data={data} />
+      <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <span aria-hidden="true" className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-[#25d366]">
+          <svg viewBox="0 0 24 24" className="h-7 w-7" fill="#ffffff" aria-hidden="true">
+            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z" />
+          </svg>
+        </span>
+        <div className="min-w-0 flex-1">
+          <h3 className="font-display font-bold">Falar com a administradora no WhatsApp</h3>
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            Precisa de ajuda com o gestor? Toque no botão e fale direto com a administradora no WhatsApp.
+          </p>
+        </div>
+        <a
+          href="https://wa.me/5581993229795"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="rounded-lg bg-[#25d366] px-4 py-2.5 text-sm font-bold text-[#06281a] hover:brightness-110"
+        >
+          Abrir o WhatsApp
+        </a>
+      </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
