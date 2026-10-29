@@ -1060,6 +1060,107 @@ function MenuIcon({ tab }: { tab: Tab }) {
   }
 }
 
+/* Conteúdo da lateral, igual no PC (coluna fixa) e no celular (painel
+   deslizante). Os botões, ícones, badges e estados são os mesmos; só
+   muda o invólucro. */
+function SidebarContent({
+  data,
+  tab,
+  menu,
+  statusDots,
+  onSelect,
+  onLogout,
+  variant,
+}: {
+  data: State;
+  tab: Tab;
+  menu: { id: Tab; label: string; badge?: number }[];
+  statusDots: { label: string; ok: boolean }[];
+  onSelect: (id: Tab) => void;
+  onLogout: () => void;
+  variant: "desktop" | "drawer";
+}) {
+  return (
+    <>
+      <div className={variant === "drawer" ? "px-5 pb-1 pt-6" : "hidden px-5 pb-1 pt-6 lg:block"}>
+        <p className="font-display text-lg font-extrabold leading-tight">Painel de gestão</p>
+        <p className="mt-0.5 text-sm text-[var(--dim)]">Visão geral do sistema</p>
+        <ul className="mt-4 space-y-1.5" aria-label="Status das integrações">
+          {statusDots.map((s) => (
+            <li key={s.label} className="flex items-center gap-2 text-sm">
+              <span className={`inline-block h-2.5 w-2.5 rounded-full ${s.ok ? "bg-[var(--accent)]" : "bg-[var(--warn)]"}`} />
+              <span className="text-[var(--dim)]">{s.label}:</span>
+              <strong>{s.ok ? "funcionando" : "pendente"}</strong>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <nav
+        aria-label="Áreas do gestor"
+        className={
+          variant === "drawer"
+            ? "mt-2 flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3"
+            : "flex flex-wrap gap-1 px-3 py-3 lg:mt-2 lg:flex-1 lg:flex-col lg:flex-nowrap lg:gap-0.5 lg:overflow-y-auto lg:px-3"
+        }
+      >
+        {menu.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onSelect(t.id)}
+            aria-current={tab === t.id ? "page" : undefined}
+            className={
+              tab === t.id
+                ? "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg bg-[var(--accent-soft)] px-3 py-2.5 font-semibold text-[var(--accent-bright)] lg:w-full"
+                : "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2.5 font-medium text-[var(--text)] hover:bg-[var(--surface2)] lg:w-full"
+            }
+          >
+            <MenuIcon tab={t.id} />
+            <span>{t.label}</span>
+            {t.badge != null && t.badge > 0 && (
+              <span
+                className={`ml-auto rounded-full px-2 py-0.5 text-xs font-bold ${tab === t.id ? "bg-[var(--accent)] text-[var(--accent-ink)]" : "bg-[var(--warn-bg)] text-[var(--warn)]"}`}
+              >
+                {t.badge}
+              </span>
+            )}
+          </button>
+        ))}
+      </nav>
+      <div className="border-t border-[var(--border)] px-5 py-4">
+        <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">Sua conta</p>
+        <p className="mt-0.5 break-all text-sm font-medium">{data.accountEmail}</p>
+        {!data.isAdmin && data.access.trialEndsAt && !data.access.subExpiresAt && (
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            Teste grátis até {fmtDate(data.access.trialEndsAt)}
+            {data.access.daysLeft > 0 ? ` (${data.access.daysLeft} dia${data.access.daysLeft === 1 ? "" : "s"} restantes)` : ""}
+          </p>
+        )}
+        {!data.isAdmin && data.access.subExpiresAt && (
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            Assinatura até {fmtDate(data.access.subExpiresAt)}
+          </p>
+        )}
+        {data.isAdmin && (
+          <p className="mt-1 text-sm text-[var(--dim)]">Conta administradora</p>
+        )}
+        <button
+          type="button"
+          onClick={onLogout}
+          className="mt-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-semibold"
+          aria-label="Sair da conta"
+        >
+          Sair
+        </button>
+        <p className="mt-3 hidden text-xs leading-relaxed text-[var(--dim)] lg:block">
+          Pagamento aprovado só vira renovação quando a extensão no painel é
+          confirmada. Extensões pendentes aparecem em Transações.
+        </p>
+      </div>
+    </>
+  );
+}
+
 function Manager({
   data,
   isPending,
@@ -1074,6 +1175,26 @@ function Manager({
   const [tab, setTab] = useState<Tab>("dashboard");
   const [clientSearch, setClientSearch] = useState("");
   const [clientFilter, setClientFilter] = useState<ClientFilter>("todos");
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  function selectArea(id: Tab) {
+    setTab(id);
+    setMenuOpen(false);
+  }
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [menuOpen]);
 
   if (isPending) {
     return <div className="min-h-screen bg-[var(--bg)] p-6 text-[var(--text)]">Carregando o gestor…</div>;
@@ -1129,79 +1250,78 @@ function Manager({
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--text)] lg:flex">
       <SafeAreaTopScrim backgroundColor="var(--bg)" />
-      <aside className="border-b border-[var(--border)] bg-[var(--surface)] lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-72 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
-        <div className="hidden px-5 pb-1 pt-6 lg:block">
-          <p className="font-display text-lg font-extrabold leading-tight">Painel de gestão</p>
-          <p className="mt-0.5 text-sm text-[var(--dim)]">Visão geral do sistema</p>
-          <ul className="mt-4 space-y-1.5" aria-label="Status das integrações">
-            {statusDots.map((s) => (
-              <li key={s.label} className="flex items-center gap-2 text-sm">
-                <span className={`inline-block h-2.5 w-2.5 rounded-full ${s.ok ? "bg-[var(--accent)]" : "bg-[var(--warn)]"}`} />
-                <span className="text-[var(--dim)]">{s.label}:</span>
-                <strong>{s.ok ? "funcionando" : "pendente"}</strong>
-              </li>
-            ))}
-          </ul>
-        </div>
-        <nav
-          aria-label="Áreas do gestor"
-          className="flex flex-wrap gap-1 px-3 py-3 lg:mt-2 lg:flex-1 lg:flex-col lg:flex-nowrap lg:gap-0.5 lg:overflow-y-auto lg:px-3"
+      {/* Barra fina do topo, só no celular: o menu fica na lateral deslizante. */}
+      <header className="sticky top-0 z-30 flex items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 py-3 lg:hidden">
+        <button
+          type="button"
+          onClick={() => setMenuOpen(true)}
+          aria-label="Abrir menu"
+          aria-expanded={menuOpen}
+          aria-controls="menu-lateral-celular"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[var(--border)]"
         >
-          {menu.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setTab(t.id)}
-              aria-current={tab === t.id ? "page" : undefined}
-              className={
-                tab === t.id
-                  ? "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg bg-[var(--accent-soft)] px-3 py-2.5 font-semibold text-[var(--accent-bright)] lg:w-full"
-                  : "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2.5 font-medium text-[var(--text)] hover:bg-[var(--surface2)] lg:w-full"
-              }
-            >
-              <MenuIcon tab={t.id} />
-              <span>{t.label}</span>
-              {t.badge != null && t.badge > 0 && (
-                <span
-                  className={`ml-auto rounded-full px-2 py-0.5 text-xs font-bold ${tab === t.id ? "bg-[var(--accent)] text-[var(--accent-ink)]" : "bg-[var(--warn-bg)] text-[var(--warn)]"}`}
-                >
-                  {t.badge}
-                </span>
-              )}
-            </button>
-          ))}
-        </nav>
-        <div className="border-t border-[var(--border)] px-5 py-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">Sua conta</p>
-          <p className="mt-0.5 break-all text-sm font-medium">{data.accountEmail}</p>
-          {!data.isAdmin && data.access.trialEndsAt && !data.access.subExpiresAt && (
-            <p className="mt-1 text-sm text-[var(--dim)]">
-              Teste grátis até {fmtDate(data.access.trialEndsAt)}
-              {data.access.daysLeft > 0 ? ` (${data.access.daysLeft} dia${data.access.daysLeft === 1 ? "" : "s"} restantes)` : ""}
-            </p>
-          )}
-          {!data.isAdmin && data.access.subExpiresAt && (
-            <p className="mt-1 text-sm text-[var(--dim)]">
-              Assinatura até {fmtDate(data.access.subExpiresAt)}
-            </p>
-          )}
-          {data.isAdmin && (
-            <p className="mt-1 text-sm text-[var(--dim)]">Conta administradora</p>
-          )}
-          <button
-            type="button"
-            onClick={onLogout}
-            className="mt-2 rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-semibold"
-            aria-label="Sair da conta"
-          >
-            Sair
-          </button>
-          <p className="mt-3 hidden text-xs leading-relaxed text-[var(--dim)] lg:block">
-            Pagamento aprovado só vira renovação quando a extensão no painel é
-            confirmada. Extensões pendentes aparecem em Transações.
-          </p>
-        </div>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+        <p className="font-display text-lg font-extrabold leading-tight">Painel de gestão</p>
+      </header>
+      <aside className="hidden border-b border-[var(--border)] bg-[var(--surface)] lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-72 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
+        <SidebarContent
+          data={data}
+          tab={tab}
+          menu={menu}
+          statusDots={statusDots}
+          onSelect={selectArea}
+          onLogout={onLogout}
+          variant="desktop"
+        />
       </aside>
+
+      {/* Menu lateral deslizante, só no celular. */}
+      <div className={`fixed inset-0 z-50 lg:hidden ${menuOpen ? "" : "pointer-events-none"}`}>
+        <button
+          type="button"
+          aria-label="Fechar menu"
+          onClick={() => setMenuOpen(false)}
+          tabIndex={menuOpen ? 0 : -1}
+          className={`absolute inset-0 h-full w-full bg-black/60 transition-opacity duration-300 ${menuOpen ? "opacity-100" : "opacity-0"}`}
+        />
+        <div
+          id="menu-lateral-celular"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Menu do gestor"
+          className={`absolute left-0 top-0 flex h-full w-72 max-w-[85vw] flex-col border-r border-[var(--border)] bg-[var(--surface)] shadow-2xl ${
+            menuOpen
+              ? "visible translate-x-0 [transition:transform_.3s_ease-out,visibility_0s]"
+              : "invisible -translate-x-full [transition:transform_.3s_ease-out,visibility_0s_linear_.3s]"
+          }`}
+        >
+          <div className="flex justify-end px-3 pt-3">
+            <button
+              type="button"
+              onClick={() => setMenuOpen(false)}
+              aria-label="Fechar menu"
+              tabIndex={menuOpen ? 0 : -1}
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-[var(--border)]"
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+                <path d="M6 6l12 12M18 6L6 18" />
+              </svg>
+            </button>
+          </div>
+          <SidebarContent
+            data={data}
+            tab={tab}
+            menu={menu}
+            statusDots={statusDots}
+            onSelect={selectArea}
+            onLogout={onLogout}
+            variant="drawer"
+          />
+        </div>
+      </div>
 
       <main className="mx-auto w-full min-w-0 max-w-[1440px] flex-1 px-4 pb-12 lg:px-8">
         {tab === "dashboard" && (
