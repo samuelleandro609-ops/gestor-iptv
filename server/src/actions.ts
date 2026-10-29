@@ -2,7 +2,7 @@ import { z } from "zod";
 import QRCode from "qrcode";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
-import { asc, desc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const okResponse = z.object({ ok: z.literal(true) });
@@ -2134,6 +2134,214 @@ const stateResponse = z.object({
     })
     .nullable(),
 });
+
+// ---------------- Backup e restauração: formato e validação ----------------
+// Backup COMPLETO, só para a administradora: o arquivo é JSON com
+// versão, e-mail da administradora dona do backup, TODAS as contas
+// (com o hash da senha, para os logins continuarem os mesmos) e
+// TODAS as linhas de todas as contas. As datas viajam como texto
+// ISO e voltam a Date na importação; os ids antigos são guardados
+// em __oldId só para remapear as referências (o banco gera ids
+// novos, sem misturar os dados de uma conta com os de outra). A
+// conta da administradora que restaura é preservada (mesmo id),
+// para a sessão dela continuar valendo; as demais contas ganham
+// ids novos. Sessões de outras contas e links de redefinição de
+// senha não vão no arquivo (expiram sozinhos).
+const BACKUP_KIND = "gestor-iptv-backup";
+const BACKUP_VERSION = 2;
+const BACKUP_MAX_BYTES = 10_000_000;
+
+const BACKUP_DATE_FIELDS: Record<string, string[]> = {
+  account: ["createdAt", "trialEndsAt", "subExpiresAt", "lastLoginAt"],
+  servers: ["createdAt"],
+  integrations: ["createdAt"],
+  serverCreditLogs: ["createdAt"],
+  plans: ["createdAt"],
+  clients: ["expiresAt", "createdAt"],
+  renewals: ["oldExpiresAt", "newExpiresAt", "createdAt"],
+  payments: ["wouldExpireAt", "createdAt", "updatedAt"],
+  expenses: ["createdAt"],
+  coupons: ["createdAt"],
+  settings: [],
+  subscriptionPayments: ["createdAt", "paidAt"],
+};
+
+const BACKUP_COLUMNS: Record<string, string[]> = {
+  account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
+  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
+  integrations: ["provider", "name", "url", "panelUser", "panelPass", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
+  serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
+  plans: ["name", "days", "priceCents", "createdAt"],
+  clients: ["name", "whatsapp", "iptvUser", "iptvPass", "serverId", "planId", "priceOverrideCents", "expiresAt", "status", "isTest", "referredBy", "app", "device", "screens", "source", "extraPanel", "listState", "invoiceToken", "createdAt"],
+  renewals: ["clientId", "clientName", "iptvUser", "planName", "days", "credits", "amountCents", "oldExpiresAt", "newExpiresAt", "source", "message", "createdAt"],
+  payments: ["clientId", "clientName", "amountCents", "days", "credits", "mode", "status", "mpPaymentId", "pixCode", "couponCode", "discountCents", "detail", "wouldExpireAt", "appliedRenewalId", "createdAt", "updatedAt"],
+  expenses: ["description", "amountCents", "spentOn", "createdAt"],
+  coupons: ["code", "percentOff", "active", "createdAt"],
+  settings: ["warnDays", "mpAccessToken", "mpPublicKey", "mpVerified", "mpAccountLabel", "mpPayerEmail", "mpEnvironment", "liveMode", "renewedMessage", "expiredMessage", "chargeMessage", "whatsappStatus", "whatsappPhone", "waQrStatus", "waQrPhone", "waQrDetail", "waQrImage", "waQrUpdatedAt", "waBlockCalls", "waTranscribeAudio", "waAwayEnabled", "waAwayMessage", "publicBaseUrl", "invoiceTitle", "invoiceMessage", "invoiceColor", "warnMessage", "warnSoonMessage", "resendApiKey", "resendFrom", "defaultSubPriceCents"],
+  subscriptionPayments: ["mpPaymentId", "amountCents", "status", "createdAt", "paidAt"],
+};
+
+const BACKUP_DATA_KEYS = [
+  "servers",
+  "integrations",
+  "serverCreditLogs",
+  "plans",
+  "clients",
+  "renewals",
+  "payments",
+  "expenses",
+  "coupons",
+  "settings",
+  "subscriptionPayments",
+] as const;
+
+function backupInvalid(message: string): Error {
+  return new Error(`Arquivo de backup inválido: ${message}`);
+}
+
+function parseBackupFile(backupJson: string): {
+  exportedAt: string;
+  ownerEmail: string;
+  accounts: Record<string, unknown>[];
+  data: Record<string, unknown[]>;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(backupJson);
+  } catch {
+    throw backupInvalid("não foi possível ler o arquivo. Confira se é o arquivo .json do backup.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw backupInvalid("o formato não é o esperado.");
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.kind !== BACKUP_KIND) {
+    throw backupInvalid("este arquivo não é um backup do gestor.");
+  }
+  if (obj.version !== BACKUP_VERSION) {
+    throw backupInvalid(
+      "este backup é de um formato antigo e não pode ser restaurado. Baixe um backup novo.",
+    );
+  }
+  if (typeof obj.exportedAt !== "string" || !obj.exportedAt) {
+    throw backupInvalid("falta a data em que o backup foi feito.");
+  }
+  if (typeof obj.ownerEmail !== "string" || !obj.ownerEmail.trim()) {
+    throw backupInvalid("falta o e-mail da administradora dona do backup.");
+  }
+  if (!Array.isArray(obj.accounts) || obj.accounts.length === 0) {
+    throw backupInvalid("falta a lista de contas do backup.");
+  }
+  const accounts = obj.accounts as Record<string, unknown>[];
+  const seenEmails = new Set<string>();
+  for (const account of accounts) {
+    if (!account || typeof account !== "object" || Array.isArray(account)) {
+      throw backupInvalid("uma conta veio em formato errado.");
+    }
+    if (typeof account.email !== "string" || !account.email.trim()) {
+      throw backupInvalid("falta o e-mail de uma conta.");
+    }
+    if (typeof account.passHash !== "string" || !account.passHash) {
+      throw backupInvalid("falta a senha guardada de uma conta.");
+    }
+    const email = account.email.trim().toLowerCase();
+    if (seenEmails.has(email)) {
+      throw backupInvalid("há duas contas com o mesmo e-mail.");
+    }
+    seenEmails.add(email);
+  }
+  if (!seenEmails.has(obj.ownerEmail.trim().toLowerCase())) {
+    throw backupInvalid("a conta da administradora não está na lista de contas.");
+  }
+  if (!obj.data || typeof obj.data !== "object" || Array.isArray(obj.data)) {
+    throw backupInvalid("faltam os dados do backup.");
+  }
+  const data = obj.data as Record<string, unknown>;
+  for (const key of BACKUP_DATA_KEYS) {
+    if (!Array.isArray(data[key])) {
+      throw backupInvalid(`falta a lista de ${key}.`);
+    }
+  }
+  return {
+    exportedAt: obj.exportedAt,
+    ownerEmail: obj.ownerEmail.trim(),
+    accounts,
+    data: data as Record<string, unknown[]>,
+  };
+}
+
+function pickBackupRow(table: string, row: unknown): Record<string, unknown> {
+  if (!row || typeof row !== "object" || Array.isArray(row)) {
+    throw backupInvalid("um registro veio em formato errado.");
+  }
+  const src = row as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const col of BACKUP_COLUMNS[table]!) {
+    if (col in src) out[col] = src[col];
+  }
+  for (const field of BACKUP_DATE_FIELDS[table] ?? []) {
+    const value = out[field];
+    if (value == null) {
+      out[field] = null;
+    } else if (typeof value === "string") {
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) throw backupInvalid("uma data veio em formato errado.");
+      out[field] = d;
+    } else {
+      throw backupInvalid("uma data veio em formato errado.");
+    }
+  }
+  return out;
+}
+
+function stageBackupRows(parsed: ReturnType<typeof parseBackupFile>): {
+  accounts: Array<Record<string, unknown> & { __oldId: number }>;
+  servers: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  integrations: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  serverCreditLogs: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  plans: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  clients: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  renewals: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  payments: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  expenses: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  coupons: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  settings: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+  subscriptionPayments: Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>;
+} {
+  const staged: Record<string, Array<Record<string, unknown> & { __oldId: number; __oldOwnerId: number | null }>> = {};
+  for (const key of BACKUP_DATA_KEYS) {
+    staged[key] = parsed.data[key]!.map((row, index) => {
+      const picked = pickBackupRow(key, row);
+      const raw = row as Record<string, unknown>;
+      const oldId = typeof raw.id === "number" ? raw.id : Number(raw.id);
+      // ownerId nas tabelas de cada conta; accountId em
+      // subscriptionPayments. Sem dono, a linha não pode ser
+      // atribuída a ninguém e é descartada na importação.
+      const ownerRaw = raw.ownerId ?? raw.accountId;
+      const oldOwnerId = typeof ownerRaw === "number" ? ownerRaw : Number(ownerRaw);
+      return {
+        ...picked,
+        __oldId: Number.isFinite(oldId) ? oldId : 1_000_000 + index,
+        __oldOwnerId: Number.isFinite(oldOwnerId) ? oldOwnerId : null,
+      };
+    });
+  }
+  const accounts = parsed.accounts.map((row, index) => {
+    const picked = pickBackupRow("account", row);
+    const raw = row as Record<string, unknown>;
+    const oldId = typeof raw.id === "number" ? raw.id : Number(raw.id);
+    return { ...picked, __oldId: Number.isFinite(oldId) ? oldId : 1_000_000 + index };
+  });
+  return { accounts, ...(staged as any) };
+}
+
+function remapBackupId(map: Map<number, number>, value: unknown): number | null {
+  if (value == null) return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return map.get(n) ?? null;
+}
+
 
 export const Actions = {
   getState: defineAction({
@@ -4823,6 +5031,323 @@ export const Actions = {
         html: "<p>Este é um e-mail de teste do Gestor IPTV. Se você recebeu, o envio de e-mails está funcionando.</p>",
       });
       return result;
+    },
+  }),
+
+  // ---------------- Backup e restauração (só a administradora) ----------------
+  // O backup é o arquivo de segurança da conta da administradora: ele
+  // guarda TUDO que é dela (clientes, servidores, planos, cobranças,
+  // configurações com as chaves salvas, mensagens e pagamentos da
+  // assinatura) para trazer de volta se o banco de dados gratuito
+  // expirar. Regras de segurança, sem exceção:
+  // - só a administradora exporta e importa (o servidor recusa
+  //   qualquer outra conta);
+  // - o arquivo só restaura na conta do MESMO e-mail do backup;
+  // - a restauração substitui TODOS os dados do gestor (todas as
+  //   contas e todas as linhas), em transação: nada de uma conta
+  //   se mistura com outra;
+  // - sessões de login e links de redefinição de senha NÃO vão no
+  //   arquivo (expiram sozinhos e não fazem sentido fora do banco);
+  // - a senha de cada conta vai só como hash (passHash), como já
+  //   fica guardada no banco — os logins continuam os mesmos depois
+  //   de restaurar. O arquivo contém senhas e chaves: quem baixa
+  //   deve guardar com cuidado e nunca compartilhar.
+  // - o WhatsApp NÃO vai no backup: depois de restaurar é preciso
+  //   ler um novo QR Code.
+  exportBackup: defineAction({
+    request: z.object({ session: sessionField }),
+    response: z.object({
+      backupJson: z.string(),
+      exportedAt: z.string(),
+      email: z.string(),
+      counts: z.record(z.string(), z.number()),
+    }),
+    async handler(ctx, args) {
+      const adminId = await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const accountRow = await loadAccountRow(ctx, adminId);
+      if (!accountRow) throw new Error("Conta não encontrada.");
+      const [accounts, servers, integrations, serverCreditLogs, plans, clients, renewals, payments, expenses, coupons, settings, subscriptionPayments] =
+        await Promise.all([
+          db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)),
+          db.select().from(schema.servers),
+          db.select().from(schema.integrations),
+          db.select().from(schema.serverCreditLogs),
+          db.select().from(schema.plans),
+          db.select().from(schema.clients),
+          db.select().from(schema.renewals),
+          db.select().from(schema.payments),
+          db.select().from(schema.expenses),
+          db.select().from(schema.coupons),
+          db.select().from(schema.settings),
+          db.select().from(schema.subscriptionPayments),
+        ]);
+      const exportedAt = new Date().toISOString();
+      const payload = {
+        kind: BACKUP_KIND,
+        version: BACKUP_VERSION,
+        exportedAt,
+        ownerEmail: accountRow.email,
+        accounts,
+        data: {
+          servers,
+          integrations,
+          serverCreditLogs,
+          plans,
+          clients,
+          renewals,
+          payments,
+          expenses,
+          coupons,
+          settings,
+          subscriptionPayments,
+        },
+      };
+      const counts: Record<string, number> = {
+        contas: accounts.length,
+        servidores: servers.length,
+        integrações: integrations.length,
+        movimentações: serverCreditLogs.length,
+        planos: plans.length,
+        clientes: clients.length,
+        renovações: renewals.length,
+        cobranças: payments.length,
+        despesas: expenses.length,
+        cupons: coupons.length,
+        configurações: settings.length,
+        pagamentos: subscriptionPayments.length,
+      };
+      return { backupJson: JSON.stringify(payload), exportedAt, email: accountRow.email, counts };
+    },
+  }),
+
+  importBackup: defineAction({
+    request: z.object({ session: sessionField, backupJson: z.string().max(BACKUP_MAX_BYTES) }),
+    response: z.object({
+      ok: z.literal(true),
+      email: z.string(),
+      exportedAt: z.string(),
+      counts: z.record(z.string(), z.number()),
+    }),
+    async handler(ctx, args) {
+      const adminId = await requireAdmin(ctx, args.session);
+      const db = ctx.db<typeof schema>();
+      const accountRow = await loadAccountRow(ctx, adminId);
+      if (!accountRow) throw new Error("Conta não encontrada.");
+      // Validação completa ANTES de tocar no banco: arquivo inválido
+      // ou de outra conta não altera nada.
+      const parsed = parseBackupFile(args.backupJson);
+      const backupEmail = parsed.ownerEmail.trim().toLowerCase();
+      if (backupEmail !== accountRow.email.trim().toLowerCase()) {
+        throw new Error(
+          "Este backup pertence a outra administradora. Entre com a conta dona do backup para restaurar.",
+        );
+      }
+      const staged = stageBackupRows(parsed);
+      const counts: Record<string, number> = {};
+      try {
+        await db.transaction(async (tx) => {
+          // Apaga TUDO: a restauração completa substitui o banco
+          // inteiro. Preserva só a linha da administradora que
+          // restaura (a sessão dela continua valendo) e as sessões
+          // dela; sessões de outras contas e links de redefinição
+          // de senha são descartados (expiram sozinhos).
+          await tx.delete(schema.subscriptionPayments);
+          await tx.delete(schema.payments);
+          await tx.delete(schema.renewals);
+          await tx.delete(schema.serverCreditLogs);
+          await tx.delete(schema.clients);
+          await tx.delete(schema.plans);
+          await tx.delete(schema.servers);
+          await tx.delete(schema.integrations);
+          await tx.delete(schema.expenses);
+          await tx.delete(schema.coupons);
+          await tx.delete(schema.settings);
+          await tx.delete(schema.accounts).where(ne(schema.accounts.id, adminId));
+          await tx.delete(schema.sessions).where(ne(schema.sessions.accountId, adminId));
+          await tx.delete(schema.passwordResets);
+
+          // Contas: a administradora que restaura é preservada
+          // (mesmo id, para a sessão dela continuar valendo) e
+          // recebe os dados do backup; as demais contas são
+          // recriadas com ids novos. Linha sem conta conhecida é
+          // descartada, para nenhum dado cair na conta errada.
+          const accountIds = new Map<number, number>();
+          for (const row of staged.accounts) {
+            const { __oldId, ...rest } = row as any;
+            if (String(rest.email).trim().toLowerCase() === backupEmail) {
+              await tx
+                .update(schema.accounts)
+                .set({ ...rest } as any)
+                .where(eq(schema.accounts.id, adminId));
+              accountIds.set(__oldId, adminId);
+            } else {
+              const inserted = await tx
+                .insert(schema.accounts)
+                .values({ ...rest } as any)
+                .returning({ id: schema.accounts.id });
+              accountIds.set(__oldId, inserted[0]!.id);
+            }
+          }
+          const ownerFor = (oldOwnerId: number | null): number | null =>
+            oldOwnerId == null ? null : (accountIds.get(oldOwnerId) ?? null);
+
+          // Reinsere com IDs novos (a sequência do banco manda) e
+          // remapeia as referências entre as tabelas. Linhas que
+          // apontam para um registro ausente no backup são puladas
+          // (o registro sumiu antes do backup; nada é inventado).
+          const integrationIds = new Map<number, number>();
+          for (const row of staged.integrations) {
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const inserted = await tx
+              .insert(schema.integrations)
+              .values({ ...row, ownerId: newOwnerId } as any)
+              .returning({ id: schema.integrations.id });
+            integrationIds.set(row.__oldId, inserted[0]!.id);
+          }
+          const serverIds = new Map<number, number>();
+          const serverLinkFixups: Array<{ newId: number; oldIntegrationServerId: unknown }> = [];
+          for (const row of staged.servers) {
+            const { __oldId, panelIntegrationId, integrationServerId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const inserted = await tx
+              .insert(schema.servers)
+              .values({
+                ...rest,
+                ownerId: newOwnerId,
+                panelIntegrationId: remapBackupId(integrationIds, panelIntegrationId),
+                integrationServerId: null,
+              } as any)
+              .returning({ id: schema.servers.id });
+            serverIds.set(__oldId, inserted[0]!.id);
+            serverLinkFixups.push({ newId: inserted[0]!.id, oldIntegrationServerId: integrationServerId });
+          }
+          for (const fix of serverLinkFixups) {
+            const target = remapBackupId(serverIds, fix.oldIntegrationServerId);
+            if (target != null) {
+              await tx
+                .update(schema.servers)
+                .set({ integrationServerId: target })
+                .where(eq(schema.servers.id, fix.newId));
+            }
+          }
+          const planIds = new Map<number, number>();
+          for (const row of staged.plans) {
+            const { __oldId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const inserted = await tx
+              .insert(schema.plans)
+              .values({ ...rest, ownerId: newOwnerId } as any)
+              .returning({ id: schema.plans.id });
+            planIds.set(__oldId, inserted[0]!.id);
+          }
+          const clientIds = new Map<number, number>();
+          for (const row of staged.clients) {
+            const { __oldId, serverId, planId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const inserted = await tx
+              .insert(schema.clients)
+              .values({
+                ...rest,
+                ownerId: newOwnerId,
+                serverId: remapBackupId(serverIds, serverId),
+                planId: remapBackupId(planIds, planId),
+              } as any)
+              .returning({ id: schema.clients.id });
+            clientIds.set(__oldId, inserted[0]!.id);
+          }
+          const renewalIds = new Map<number, number>();
+          let insertedPayments = 0;
+          for (const row of staged.renewals) {
+            const { __oldId, clientId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const newClientId = remapBackupId(clientIds, clientId);
+            if (newClientId == null) continue;
+            const inserted = await tx
+              .insert(schema.renewals)
+              .values({ ...rest, ownerId: newOwnerId, clientId: newClientId } as any)
+              .returning({ id: schema.renewals.id });
+            renewalIds.set(__oldId, inserted[0]!.id);
+          }
+          for (const row of staged.payments) {
+            const { __oldId, clientId, appliedRenewalId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const newClientId = remapBackupId(clientIds, clientId);
+            if (newClientId == null) continue;
+            insertedPayments += 1;
+            await tx.insert(schema.payments).values({
+              ...rest,
+              ownerId: newOwnerId,
+              clientId: newClientId,
+              appliedRenewalId: remapBackupId(renewalIds, appliedRenewalId),
+            } as any);
+          }
+          let insertedCreditLogs = 0;
+          for (const row of staged.serverCreditLogs) {
+            const { __oldId, serverId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            const newServerId = remapBackupId(serverIds, serverId);
+            if (newServerId == null) continue;
+            insertedCreditLogs += 1;
+            await tx.insert(schema.serverCreditLogs).values({
+              ...rest,
+              ownerId: newOwnerId,
+              serverId: newServerId,
+            } as any);
+          }
+          for (const row of staged.expenses) {
+            const { __oldId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            await tx.insert(schema.expenses).values({ ...rest, ownerId: newOwnerId } as any);
+          }
+          for (const row of staged.coupons) {
+            const { __oldId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            await tx.insert(schema.coupons).values({ ...rest, ownerId: newOwnerId } as any);
+          }
+          for (const row of staged.settings) {
+            const { __oldId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            await tx.insert(schema.settings).values({ ...rest, ownerId: newOwnerId } as any);
+          }
+          for (const row of staged.subscriptionPayments) {
+            const { __oldId, ...rest } = row as any;
+            const newOwnerId = ownerFor(row.__oldOwnerId);
+            if (newOwnerId == null) continue;
+            await tx.insert(schema.subscriptionPayments).values({ ...rest, accountId: newOwnerId } as any);
+          }
+          // A conta da administradora já foi atualizada no início
+          // (mesmo id, para a sessão dela continuar valendo) e as
+          // demais contas foram recriadas com ids novos.
+          counts.contas = accountIds.size;
+          counts.servidores = serverIds.size;
+          counts.integrações = integrationIds.size;
+          counts.movimentações = insertedCreditLogs;
+          counts.planos = planIds.size;
+          counts.clientes = clientIds.size;
+          counts.renovações = renewalIds.size;
+          counts.cobranças = insertedPayments;
+          counts.despesas = staged.expenses.length;
+          counts.cupons = staged.coupons.length;
+          counts.configurações = staged.settings.length;
+          counts.pagamentos = staged.subscriptionPayments.length;
+        });
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("Arquivo de backup inválido")) throw err;
+        throw new Error("Não foi possível restaurar o backup. Nenhum dado foi alterado.");
+      }
+      ctx.invalidateQueries();
+      return { ok: true as const, email: accountRow.email, exportedAt: parsed.exportedAt, counts };
     },
   }),
 
