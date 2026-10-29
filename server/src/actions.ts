@@ -4232,8 +4232,17 @@ export const Actions = {
       // pode gerar cobrança para o cliente.
       invoiceToken: z.string().max(120).optional(),
     }),
-    response: paymentShape,
-    async handler(ctx, args): Promise<z.infer<typeof paymentShape>> {
+    response: paymentShape.extend({
+      // QR Code do Pix desta fatura: gerado no servidor a partir do
+      // código Pix EXATO desta cobrança (mesmo helper da assinatura).
+      // Null quando a geração falha — a chave copiável continua
+      // valendo e o pagamento nunca quebra por causa do QR.
+      qrDataUrl: z.string().nullable(),
+    }),
+    async handler(
+      ctx,
+      args,
+    ): Promise<z.infer<typeof paymentShape> & { qrDataUrl: string | null }> {
       const db = ctx.db<typeof schema>();
       const { client, plan } = await loadClientAndPlan(ctx, args.clientId);
       if (args.invoiceToken) {
@@ -4390,6 +4399,7 @@ export const Actions = {
         status: row.status,
         mpPaymentId: row.mpPaymentId ?? null,
         pixCode: row.pixCode ?? null,
+        qrDataUrl: await pixQrDataUrl(row.pixCode ?? null),
         couponCode: row.couponCode ?? null,
         discountCents: row.discountCents ?? 0,
         detail: row.detail,
