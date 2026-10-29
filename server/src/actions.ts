@@ -656,13 +656,14 @@ async function resolvePanelServer(
 
 function renderExtendTemplate(
   tpl: string,
-  vars: { usuario: string; senha: string; dias: number; creditos: number },
+  vars: { usuario: string; senha: string; dias: number; creditos: number; id?: string },
 ): string {
   return tpl
     .replaceAll("{usuario}", vars.usuario)
     .replaceAll("{senha}", vars.senha)
     .replaceAll("{dias}", String(vars.dias))
-    .replaceAll("{creditos}", String(vars.creditos));
+    .replaceAll("{creditos}", String(vars.creditos))
+    .replaceAll("{id}", vars.id ?? "");
 }
 
 type PanelApiBaseInspection = {
@@ -868,11 +869,74 @@ async function panelExtendUser(
       detail: `Extensão pendente do usuário ${args.iptvUser}: o servidor está conectado com link, usuário e senha do painel, mas a chamada de extensão da API deste painel pede o token emitido no login — e nenhum token foi guardado ainda neste servidor. Toque em “Testar conexão” neste servidor para o gestor entrar com o usuário e a senha do painel e guardar o token emitido. Nada foi renovado no painel e nenhum crédito foi consumido.`,
     };
   const credits = creditsForDays(args.days);
-  const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits };
-  const path = renderExtendTemplate(server.extendPath || "/users/extend", vars);
+  // Fluxo documentado da API WPlay/WManage (referência oficial):
+  // 1) GET /lines?generalSearch={usuário} lista clientes (busca
+  // PARCIAL em username/whatsapp/notes) — é preciso escolher o item
+  // cujo username é EXATAMENTE o do cliente, para nunca estender o
+  // usuário errado. 2) PATCH /lines/v2/extend/{id} com {"days": N}.
+  // Servidores salvos com o caminho antigo "/users/extend" (um
+  // palpite que a API respondeu 404) usam a rota documentada sem a
+  // dona precisar redigitar nada; caminho/método/corpo diferentes
+  // desse padrão antigo continuam sendo respeitados, com {id}
+  // disponível nos modelos.
+  const LEGACY_EXTEND_PATH = "/users/extend";
+  const DOCUMENTED_EXTEND_PATH = "/lines/v2/extend/{id}";
+  const isLegacyExtend = (server.extendPath || "").trim() === LEGACY_EXTEND_PATH;
+  const effPath = isLegacyExtend ? DOCUMENTED_EXTEND_PATH : server.extendPath || DOCUMENTED_EXTEND_PATH;
+  const effMethod = isLegacyExtend ? "PATCH" : (server.extendMethod || "POST").toUpperCase();
+  const effBodyTpl = isLegacyExtend ? '{"days":{dias}}' : (server.extendBody ?? "");
+  let panelId: string;
+  try {
+    const lookupUrl = `${base}/lines?generalSearch=${encodeURIComponent(args.iptvUser)}`;
+    const lookupRes = await fetch(lookupUrl, {
+      headers: { Authorization: `Bearer ${server.apiToken}` },
+      signal: AbortSignal.timeout(20000),
+    });
+    const lookupRaw = await lookupRes.text().catch(() => "");
+    if (!lookupRes.ok) {
+      const shownLookup = sanitizePanelResponseBody(lookupRaw, [server.apiToken, args.iptvPass], 500);
+      const lookupFailure = panelResponseFailureMessage(lookupRaw);
+      return {
+        ok: false,
+        detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: a busca na API respondeu HTTP ${lookupRes.status}${lookupFailure ? ` — ${lookupFailure}` : ""}. ${shownLookup ? `Resposta da API: ${shownLookup}. ` : ""}Nada foi renovado no painel e nenhum crédito foi consumido.`,
+      };
+    }
+    let items: unknown;
+    try {
+      const parsed = JSON.parse(lookupRaw) as Record<string, unknown>;
+      items = parsed?.items;
+    } catch {
+      items = undefined;
+    }
+    if (!Array.isArray(items)) {
+      return {
+        ok: false,
+        detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: a busca na API não trouxe uma lista de clientes válida. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+      };
+    }
+    const exact = items.find(
+      (it): it is Record<string, unknown> =>
+        !!it && typeof it === "object" && (it as Record<string, unknown>).username === args.iptvUser,
+    );
+    if (!exact || (typeof exact.id !== "string" && typeof exact.id !== "number") || String(exact.id).trim() === "") {
+      return {
+        ok: false,
+        detail: `O usuário ${args.iptvUser} não foi encontrado no painel (a busca trouxe só nomes parecidos, nenhum igual). Nada foi renovado no painel e nenhum crédito foi consumido. Confira se o usuário IPTV cadastrado no cliente está igual ao do painel.`,
+      };
+    }
+    panelId = String(exact.id);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: ${sanitizePanelResponseBody(message, [server.apiToken, args.iptvPass], 300)}. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits, id: panelId };
+  const path = renderExtendTemplate(effPath, vars);
   const url = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
-  const method = (server.extendMethod || "POST").toUpperCase();
-  const bodyText = renderExtendTemplate(server.extendBody ?? "", vars);
+  const method = effMethod;
+  const bodyText = renderExtendTemplate(effBodyTpl, vars);
   try {
     const res = await fetch(url, {
       method,
@@ -887,9 +951,14 @@ async function panelExtendUser(
     const shownBody = sanitizePanelResponseBody(rawBody, [server.apiToken, args.iptvPass], 500);
     const failureMessage = panelResponseFailureMessage(rawBody);
     if (res.ok && !failureMessage) {
+      let expDate = "";
+      try {
+        const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+        if (typeof parsed?.exp_date === "string") expDate = parsed.exp_date;
+      } catch {}
       return {
         ok: true,
-        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}).${shownBody ? ` Resposta da API: ${shownBody}` : ""}`,
+        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}).${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
       };
     }
     return {
@@ -3419,12 +3488,12 @@ export const Actions = {
         : args.apiToken !== undefined && args.apiToken.trim()
           ? args.apiToken.trim()
           : (existing?.apiToken ?? "");
-      const extendPath = keepText(args.extendPath, existing?.extendPath, "/users/extend") || "/users/extend";
-      const extendMethod = keep(args.extendMethod, existing?.extendMethod as "POST" | "PUT" | "PATCH" | "GET" | undefined, "POST");
+      const extendPath = keepText(args.extendPath, existing?.extendPath, "/lines/v2/extend/{id}") || "/lines/v2/extend/{id}";
+      const extendMethod = keep(args.extendMethod, existing?.extendMethod as "POST" | "PUT" | "PATCH" | "GET" | undefined, "PATCH");
       const extendBody = keep(
         args.extendBody,
         existing?.extendBody,
-        '{"username":"{usuario}","days":{dias},"credits":{creditos}}',
+        '{"days":{dias}}',
       );
       const initialCredits = existing ? 0 : (args.initialCredits ?? 0);
 
