@@ -102,6 +102,11 @@ export const servers = pgTable("servers", {
     .default('{"username":"{usuario}","days":{dias},"credits":{creditos}}'),
   extendVerified: integer("extend_verified").notNull().default(0),
   extendStatusDetail: text("extend_status_detail").notNull().default(""),
+  // Provedor do painel deste servidor: "wplay" (WPlay/WManage, o
+  // padrão de todos os servidores antigos) ou "sigma" (Sigma/OneTV,
+  // via integração vinculada). Decide qual API o teste de conexão
+  // e a extensão usam para este servidor.
+  panelProvider: text("panel_provider").notNull().default("wplay"),
   // Conexão simples do servidor (link + usuário + senha do painel):
   // ao salvar, o gestor testa o link de verdade e guarda aqui se
   // conectou (panelConnected), o motivo em linguagem simples e quando
@@ -161,12 +166,14 @@ export const servers = pgTable("servers", {
     .$defaultFn(() => new Date()),
 });
 
-// Integrações com painéis IPTV (aba Integrações). Por enquanto o único
-// provider disponível é "wplay". Guarda nome, URL do servidor, usuário
-// e senha do painel (a senha nunca é devolvida para a tela). O teste de
-// conexão grava status/detail; Info Painel e Sync IDs gravam o que o
-// painel respondeu de verdade. Um servidor vincula uma integração em
-// servers.panelIntegrationId para testes e renovações automáticas.
+// Integrações com painéis IPTV (aba Integrações). Dois providers:
+// "wplay" (nome, URL, usuário e senha do painel) e "sigma" (Sigma/
+// OneTV: base da API de revendedor + token Bearer, guardados em
+// apiBase/apiToken — o token nunca é devolvido para a tela). O teste
+// de conexão grava status/detail; Info Painel e Sync IDs gravam o que
+// o painel respondeu de verdade (só WPlay). Um servidor vincula uma
+// integração em servers.panelIntegrationId para testes e renovações
+// automáticas.
 export const integrations = pgTable("integrations", {
   id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
   ownerId: integer("owner_id").notNull().default(0),
@@ -175,6 +182,13 @@ export const integrations = pgTable("integrations", {
   url: text("url").notNull(),
   panelUser: text("panel_user").notNull(),
   panelPass: text("panel_pass").notNull(),
+  // Sigma: base da API de revendedor (ex.:
+  // https://painel.onetv.plus/api/reseller-api/v1) e token Bearer
+  // criado na página de API de revendedor do painel. O token fica só
+  // no banco e NUNCA é devolvido para a tela — a API expõe apenas se
+  // ele está salvo (hasApiToken).
+  apiBase: text("api_base").notNull().default(""),
+  apiToken: text("api_token").notNull().default(""),
   status: text("status")
     .notNull()
     .default("nao_testado"),

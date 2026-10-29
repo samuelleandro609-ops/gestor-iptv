@@ -582,7 +582,10 @@ async function loadPanelStatus(ctx: Ctx, ownerId: number): Promise<{
           : "Extensão pendente: o servidor está conectado, mas nenhuma extensão real retornou sucesso ainda — se a API do painel responder erro (ex.: HTTP 400), a renovação fica pendente com o motivo, sem consumir crédito.",
     };
   }
-  const verified = rows.find((r) => r.apiToken.length > 0 && r.apiVerified === 1);
+  // apiVerified basta: no WPlay o token emitido fica guardado no
+  // servidor, mas na Sigma o token fica na integração vinculada e o
+  // servidor pode estar verificado sem token próprio guardado nele.
+  const verified = rows.find((r) => r.apiVerified === 1);
   if (verified) {
     return {
       connected: true,
@@ -624,9 +627,9 @@ async function resolvePanelServer(
   const rows = await db.select().from(schema.servers).where(eq(schema.servers.ownerId, client.ownerId));
   if (client.serverId != null) {
     const own = rows.find((r) => r.id === client.serverId);
-    if (own && own.apiToken.length > 0 && own.apiVerified === 1) return own;
+    if (own && own.apiVerified === 1) return own;
   }
-  return rows.find((r) => r.apiToken.length > 0 && r.apiVerified === 1) ?? null;
+  return rows.find((r) => r.apiVerified === 1) ?? null;
 }
 
 function renderExtendTemplate(
@@ -815,6 +818,16 @@ async function panelExtendUser(
   server: typeof schema.servers.$inferSelect,
   args: { iptvUser: string; iptvPass: string; days: number },
 ): Promise<{ ok: boolean; detail: string }> {
+  // Sigma: a extensão usa a API de revendedor (busca por usuário
+  // exato + POST /renew sem corpo). O provedor vem do servidor
+  // (panelProvider) ou da integração vinculada, já resolvido em
+  // apiBase/apiToken por quem chama.
+  if ((server.panelProvider ?? "wplay") === "sigma") {
+    return sigmaExtendUser(
+      { apiBase: server.apiBase, apiToken: server.apiToken },
+      { iptvUser: args.iptvUser },
+    );
+  }
   const baseCheck = inspectPanelApiBase(resolvePanelApiBase(server.apiBase));
   if (!baseCheck.valid) return { ok: false, detail: `A base da API do painel está inválida: ${baseCheck.error}` };
   const base = baseCheck.normalized;
@@ -1204,6 +1217,426 @@ async function panelTestConnection(
 }
 
 
+// ---------------- API Sigma (painel OneTV/NEWONETV) ----------------
+// Contrato: o arquivo llms.txt (Sigma Reseller API, OpenAPI 3.1),
+// lido na íntegra. Só estas rotas existem no código: GET /me,
+// GET /customers/by-username/{username} e POST
+// /customers/{hashid}/renew (sem corpo documentado — nenhum corpo é
+// enviado). Autenticação: Authorization: Bearer <token> em toda
+// chamada; o token é criado na página de API de revendedor do painel,
+// com escopos explícitos, e o texto dele aparece uma só vez. Sem o
+// escopo da operação a API responde 403 insufficient_scope; permissão
+// removida no painel responde 403 permission_denied; token travado
+// por IP responde 403 ip_not_allowed; integração inativa responde
+// 402. Webhooks (/me/webhooks*) exigem sessão do painel — NÃO são
+// implementados aqui. Limite: 120 chamadas/min; o 429 traz
+// Retry-After e NUNCA dispara repetição automática de uma renovação.
+const DEFAULT_SIGMA_API_BASE = "https://painel.onetv.plus/api/reseller-api/v1";
+const SIGMA_REQUIRED_SCOPES = ["me.read", "customers.read", "customers.renew"];
+
+// Normaliza a base da API Sigma. Diferente da base WPlay, a base
+// Sigma INCLUI o caminho /api/reseller-api/v1 — ele é mantido. Vazia
+// = base padrão do painel atual.
+function normalizeSigmaApiBase(raw: string): {
+  valid: boolean;
+  normalized: string;
+  error: string;
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const original = raw.trim();
+  if (!original) {
+    return {
+      valid: true,
+      normalized: DEFAULT_SIGMA_API_BASE,
+      error: "",
+      warnings: ["Nenhuma base salva: o teste usou a base padrão da API Sigma."],
+    };
+  }
+  let candidate = original.replace(/\s+/g, "");
+  if (candidate !== original) warnings.push("Havia espaços na base; eles foram removidos para o teste.");
+  if (candidate.endsWith("/")) {
+    candidate = candidate.replace(/\/+$/, "");
+    warnings.push("A base terminava com barra (/). A barra final foi removida.");
+  }
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(candidate)) {
+    candidate = `https://${candidate}`;
+    warnings.push("A base estava sem https:// no começo; o teste usou https:// automaticamente.");
+  }
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return {
+      valid: false,
+      normalized: "",
+      error: "A base da API Sigma não é um endereço válido. Ela precisa se parecer com https://painel.onetv.plus/api/reseller-api/v1.",
+      warnings,
+    };
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return {
+      valid: false,
+      normalized: "",
+      error: `A base começa com “${url.protocol}”, mas a API precisa usar http:// ou https://.`,
+      warnings,
+    };
+  }
+  if (url.username || url.password) {
+    warnings.push("A base tinha usuário/senha escritos dentro do endereço; eles foram ignorados no teste. A API Sigma usa só o token Bearer.");
+    url.username = "";
+    url.password = "";
+  }
+  if (url.search || url.hash) {
+    warnings.push("A base tinha texto depois de ? ou #; essa parte foi removida porque não faz parte do endereço da API.");
+    url.search = "";
+    url.hash = "";
+  }
+  const path = url.pathname.replace(/\/{2,}/g, "/").replace(/\/+$/, "");
+  return { valid: true, normalized: `${url.protocol}//${url.host}${path}`, error: "", warnings };
+}
+
+// Traduz uma resposta de erro da API Sigma para linguagem simples.
+// O 402 tem dois sentidos no contrato: na autenticação (/me) é
+// integração inativa; na renovação é falta de créditos no painel.
+function sigmaFailureFromResponse(
+  status: number,
+  rawBody: string,
+  retryAfter: string | null,
+  operation: "auth" | "renew" = "auth",
+): { classification: string; reason: string } {
+  let errorCode = "";
+  let message = "";
+  try {
+    const data = JSON.parse(rawBody) as unknown;
+    if (data && typeof data === "object") {
+      const obj = data as Record<string, unknown>;
+      if (typeof obj.error === "string") errorCode = obj.error;
+      if (typeof obj.message === "string") message = obj.message;
+    }
+  } catch {}
+  const suffix = message ? ` Mensagem da API: ${message}` : "";
+  switch (status) {
+    case 401:
+      return {
+        classification: "sigma_token_recusado",
+        reason: `O painel Sigma recusou o token (HTTP 401). Gere um token novo na página de API de revendedor do painel e salve ele aqui no gestor.${suffix}`,
+      };
+    case 402:
+      return operation === "renew"
+        ? {
+            classification: "sigma_sem_creditos",
+            reason: `O painel Sigma está sem créditos para renovar (HTTP 402). Recarregue créditos no painel e tente de novo.${suffix}`,
+          }
+        : {
+            classification: "sigma_integracao_inativa",
+            reason: `A integração de API de revendedor está inativa ou vencida no painel (HTTP 402). Ative/renove a integração no painel e teste de novo.${suffix}`,
+          };
+    case 403:
+      if (errorCode === "insufficient_scope") {
+        return {
+          classification: "sigma_sem_escopo",
+          reason: `O token não tem os acessos necessários (HTTP 403 insufficient_scope). Edite o token no painel e marque os acessos: ${SIGMA_REQUIRED_SCOPES.join(", ")}.${suffix}`,
+        };
+      }
+      if (errorCode === "ip_not_allowed") {
+        return {
+          classification: "sigma_ip_travado",
+          reason: `O token está travado por endereço IP (HTTP 403 ip_not_allowed) e o endereço do servidor do gestor não está na lista dele. Remova a trava de IP do token no painel — os endereços do plano gratuito mudam — e teste de novo.${suffix}`,
+        };
+      }
+      return {
+        classification: "sigma_permissao_removida",
+        reason: `A permissão de usar a API de revendedor foi removida no painel (HTTP 403 permission_denied). Peça ao dono do painel para devolver a permissão “use reseller api” ao seu usuário.${suffix}`,
+      };
+    case 404:
+      return {
+        classification: "sigma_nao_encontrado",
+        reason: `Não encontrado no painel Sigma (HTTP 404).${suffix}`,
+      };
+    case 409:
+      return {
+        classification: "sigma_duplicado",
+        reason: `Mais de um cliente usa este usuário no painel (HTTP 409). Confira o usuário IPTV exato no cadastro do cliente e use a lista de clientes do painel para achar o certo.${suffix}`,
+      };
+    case 429:
+      return {
+        classification: "sigma_limite",
+        reason: `O painel pediu para esperar (HTTP 429, limite de 120 chamadas por minuto)${retryAfter ? ` — aguarde ${retryAfter} segundo(s)` : ""} — e tente de novo em instantes. Nenhuma renovação foi repetida automaticamente.${suffix}`,
+      };
+    default:
+      return {
+        classification: "sigma_erro_api",
+        reason: `A API Sigma respondeu HTTP ${status} e não concluiu a chamada.${suffix}`,
+      };
+  }
+}
+
+function sigmaCorrectionSteps(classification: string): string[] {
+  const scopes = `No painel, edite o token da API de revendedor e marque os acessos: ${SIGMA_REQUIRED_SCOPES.join(", ")}.`;
+  const noIpLock =
+    "Crie o token SEM trava de endereço IP: o endereço do servidor do gestor no plano gratuito muda, e um token travado responde 403 ip_not_allowed.";
+  const saveToken =
+    "O token aparece escrito uma só vez no painel, na hora de criar: copie e cole ele aqui no gestor, no campo de token da integração Sigma, sem mandar o valor no chat.";
+  if (classification === "sigma_sem_escopo") return [scopes, noIpLock, saveToken];
+  if (classification === "sigma_ip_travado") return [noIpLock, "Depois de tirar a trava, toque em “Testar conexão” de novo."];
+  if (classification === "sigma_token_recusado") {
+    return [
+      "Confira se o token colado está completo, sem espaço no começo ou no fim. Se precisar, gere um token novo no painel.",
+      scopes,
+      noIpLock,
+    ];
+  }
+  if (classification === "sigma_integracao_inativa") {
+    return ["Ative a integração de API de revendedor no painel (ou renove, se venceu) e toque em “Testar conexão” de novo."];
+  }
+  if (classification === "sigma_limite") {
+    return ["Espere o tempo pedido pelo painel e teste de novo. O gestor nunca repete uma renovação sozinho por causa do limite."];
+  }
+  if (classification === "sigma_permissao_removida") {
+    return ["Peça ao dono do painel para devolver a permissão de usar a API de revendedor ao seu usuário e teste de novo."];
+  }
+  return [scopes, noIpLock, "Se o painel estiver fora do ar, tente de novo em alguns minutos."];
+}
+
+// Testa a autenticação da API Sigma: GET /me com Bearer. Só HTTP 2xx
+// marca conectado. O diagnóstico usa o mesmo formato do teste WPlay
+// (uma única tentativa: GET /me), para a tela mostrar do mesmo jeito.
+// Nenhum crédito é consumido e o token nunca volta na resposta.
+async function sigmaTestConnection(apiBase: string, token: string): Promise<PanelTestResult> {
+  const testedAt = new Date().toISOString();
+  const norm = normalizeSigmaApiBase(apiBase);
+  const endpoint = norm.valid ? `${norm.normalized}/me` : "";
+  const makeDiagnostic = (
+    classification: string,
+    headline: string,
+    attempt: PanelAuthAttempt | null,
+    winningVariant = "",
+  ): PanelDiagnostic => ({
+    testedAt,
+    endpoint,
+    baseOriginal: apiBase.trim(),
+    baseNormalized: norm.normalized,
+    baseWarnings: norm.warnings,
+    classification,
+    headline,
+    winningVariant,
+    responseBody: attempt?.responseBody ?? "",
+    attempts: attempt ? [attempt] : [],
+    steps: sigmaCorrectionSteps(classification),
+  });
+  if (!norm.valid) {
+    const diagnostic = makeDiagnostic("sigma_base_invalida", `Não conectou: ${norm.error}`, null);
+    return { connected: false, detail: diagnostic.headline, diagnostic };
+  }
+  const cleanToken = token.trim();
+  if (!cleanToken) {
+    const diagnostic = makeDiagnostic(
+      "sigma_sem_token",
+      "Não conectou: nenhum token da API Sigma está salvo. Cole o token criado na página de API de revendedor do painel e toque em “Testar conexão” de novo.",
+      null,
+    );
+    return { connected: false, detail: diagnostic.headline, diagnostic };
+  }
+  let res: Response;
+  try {
+    res = await fetch(endpoint, {
+      method: "GET",
+      headers: { Accept: "application/json", Authorization: `Bearer ${cleanToken}` },
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (e) {
+    const rawMessage = e instanceof Error ? e.message : String(e);
+    const timedOut = e instanceof Error && (e.name === "TimeoutError" || /timed out|timeout/i.test(rawMessage));
+    const attempt: PanelAuthAttempt = {
+      id: "get_me",
+      label: "GET /me",
+      description: "Leitura do perfil na API Sigma com o cabeçalho Authorization: Bearer e o token salvo.",
+      httpStatus: null,
+      responseBody: "",
+      error: timedOut
+        ? "A API não respondeu dentro de 10 segundos."
+        : `Não houve resposta da API: ${sanitizePanelResponseBody(rawMessage, [cleanToken], 240)}`,
+      success: false,
+    };
+    const diagnostic = makeDiagnostic(
+      "sigma_sem_resposta",
+      "Não conectou: a API Sigma não respondeu. Ela pode estar fora do ar, ou a base salva leva a um endereço que não responde. A renovação continua pendente e nenhum crédito foi consumido.",
+      attempt,
+    );
+    return { connected: false, detail: diagnostic.headline, diagnostic };
+  }
+  const rawBody = await res.text().catch(() => "");
+  const shownBody = sanitizePanelResponseBody(rawBody, [cleanToken], 500);
+  if (res.ok) {
+    let username = "";
+    let credits: number | null = null;
+    let envelopeOk = false;
+    try {
+      const data = JSON.parse(rawBody) as unknown;
+      const me: Record<string, unknown> | null =
+        data && typeof data === "object"
+          ? (((data as Record<string, unknown>).data as Record<string, unknown> | undefined) ??
+            (data as Record<string, unknown>))
+          : null;
+      if (me && typeof me === "object") {
+        envelopeOk = true;
+        if (typeof me.username === "string") username = me.username;
+        if (typeof me.creditsBalance === "number") credits = me.creditsBalance;
+      }
+    } catch {}
+    if (!envelopeOk) {
+      // HTTP 200 com corpo fora do formato da API (ex.: página de
+      // login): NÃO é conexão — a base pode estar apontando para a
+      // tela do painel, e não para a API de revendedor.
+      const headline =
+        "Não conectou: a API respondeu sucesso, mas a resposta não veio no formato esperado da API Sigma. Confira se a base é a da API de revendedor (termina em /api/reseller-api/v1) e não o link da tela de login do painel. A renovação continua pendente e nenhum crédito foi consumido.";
+      const attempt: PanelAuthAttempt = {
+        id: "get_me",
+        label: "GET /me",
+        description: "Leitura do perfil na API Sigma com o cabeçalho Authorization: Bearer e o token salvo.",
+        httpStatus: res.status,
+        responseBody: shownBody,
+        error: "A resposta não veio no formato JSON esperado da API Sigma.",
+        success: false,
+      };
+      const diagnostic = makeDiagnostic("sigma_erro_api", headline, attempt);
+      return { connected: false, detail: headline, diagnostic };
+    }
+    const headline = `Conectou: a API Sigma aceitou o token (HTTP ${res.status})${username ? ` — usuário do painel: ${username}` : ""}${credits != null ? ` — saldo de créditos no painel: ${credits}` : ""}. O painel passa a ser tratado como conectado neste gestor.`;
+    const attempt: PanelAuthAttempt = {
+      id: "get_me",
+      label: "GET /me",
+      description: "Leitura do perfil na API Sigma com o cabeçalho Authorization: Bearer e o token salvo.",
+      httpStatus: res.status,
+      responseBody: shownBody,
+      error: "",
+      success: true,
+    };
+    const diagnostic = makeDiagnostic("sigma_conectado", headline, attempt, "GET /me");
+    return { connected: true, detail: headline, diagnostic };
+  }
+  const failure = sigmaFailureFromResponse(res.status, rawBody, res.headers.get("retry-after"), "auth");
+  const headline = `Não conectou: ${failure.reason} A renovação continua pendente e nenhum crédito foi consumido.`;
+  const attempt: PanelAuthAttempt = {
+    id: "get_me",
+    label: "GET /me",
+    description: "Leitura do perfil na API Sigma com o cabeçalho Authorization: Bearer e o token salvo.",
+    httpStatus: res.status,
+    responseBody: shownBody,
+    error: failure.reason,
+    success: false,
+  };
+  const diagnostic = makeDiagnostic(failure.classification, headline, attempt);
+  return { connected: false, detail: headline, diagnostic };
+}
+
+// Renova UM cliente na API Sigma: busca o cliente pelo usuário IPTV
+// exato e chama POST /customers/{hashid}/renew SEM corpo (o contrato
+// não documenta corpo para a renovação). Só HTTP 2xx marca sucesso;
+// qualquer outra resposta volta pendente, sem fingir renovação e sem
+// repetir a chamada automaticamente (nunca, nem em 429).
+async function sigmaExtendUser(
+  effective: { apiBase: string; apiToken: string },
+  args: { iptvUser: string },
+): Promise<{ ok: boolean; detail: string }> {
+  const norm = normalizeSigmaApiBase(effective.apiBase);
+  if (!norm.valid) {
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: a base da API Sigma está inválida: ${norm.error} Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  const cleanToken = effective.apiToken.trim();
+  if (!cleanToken) {
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: nenhum token da API Sigma está salvo. Salve o token na integração Sigma e passe no teste de conexão. Nada foi renovado e nenhum crédito foi consumido.`,
+    };
+  }
+  const headers = { Accept: "application/json", Authorization: `Bearer ${cleanToken}` };
+  const lookupUrl = `${norm.normalized}/customers/by-username/${encodeURIComponent(args.iptvUser)}`;
+  let lookup: Response;
+  try {
+    lookup = await fetch(lookupUrl, { method: "GET", headers, signal: AbortSignal.timeout(15000) });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      detail: `Não foi possível alcançar a API Sigma para buscar o usuário ${args.iptvUser}: ${sanitizePanelResponseBody(message, [cleanToken], 300)}. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  const lookupBody = await lookup.text().catch(() => "");
+  if (!lookup.ok) {
+    const failure = sigmaFailureFromResponse(lookup.status, lookupBody, lookup.headers.get("retry-after"), "auth");
+    const reason =
+      lookup.status === 404
+        ? `O usuário ${args.iptvUser} não foi encontrado no painel Sigma. Confira o usuário IPTV exato no cadastro do cliente.`
+        : failure.reason;
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: ${reason} Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  let hashid = "";
+  try {
+    const data = JSON.parse(lookupBody) as unknown;
+    const customer: Record<string, unknown> | null =
+      data && typeof data === "object"
+        ? (((data as Record<string, unknown>).data as Record<string, unknown> | undefined) ??
+          (data as Record<string, unknown>))
+        : null;
+    if (customer && typeof customer === "object" && typeof customer.id === "string") hashid = customer.id;
+  } catch {}
+  if (!hashid) {
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: a API Sigma respondeu, mas não devolveu o identificador do cliente. Nada foi renovado e nenhum crédito foi consumido.`,
+    };
+  }
+  const renewUrl = `${norm.normalized}/customers/${encodeURIComponent(hashid)}/renew`;
+  let renew: Response;
+  try {
+    renew = await fetch(renewUrl, { method: "POST", headers, signal: AbortSignal.timeout(20000) });
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      detail: `Não foi possível alcançar a API Sigma para renovar o usuário ${args.iptvUser}: ${sanitizePanelResponseBody(message, [cleanToken], 300)}. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  const renewBody = await renew.text().catch(() => "");
+  if (!renew.ok) {
+    const failure = sigmaFailureFromResponse(renew.status, renewBody, renew.headers.get("retry-after"), "renew");
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: ${failure.reason} Nada foi renovado no painel e nenhum crédito foi consumido.`,
+    };
+  }
+  let newExpires = "";
+  let renewEnvelopeOk = false;
+  try {
+    const data = JSON.parse(renewBody) as unknown;
+    if (data && typeof data === "object") {
+      renewEnvelopeOk = true;
+      const customer = (data as Record<string, unknown>).data as Record<string, unknown> | undefined;
+      if (customer && typeof customer === "object" && typeof customer.expires_at === "string") {
+        newExpires = customer.expires_at;
+      }
+    }
+  } catch {}
+  if (!renewEnvelopeOk) {
+    return {
+      ok: false,
+      detail: `Extensão pendente do usuário ${args.iptvUser}: a API respondeu sucesso, mas a resposta não veio no formato esperado da API Sigma — por segurança, nada foi dado como renovado. Confira o cliente no painel antes de tentar de novo e nenhum crédito foi dado como consumido pelo gestor.`,
+    };
+  }
+  return {
+    ok: true,
+    detail: `A API Sigma aceitou a renovação do usuário ${args.iptvUser} (HTTP ${renew.status})${newExpires ? ` — novo vencimento no painel: ${newExpires}` : ""}.`,
+  };
+}
+
 // ---------------- WhatsApp por QR Code (único caminho) ----------------
 // O pareamento é feito pelo serviço de sessão interno do gestor
 // (módulo privilegiado): um processo persistente por conta que fala
@@ -1478,9 +1911,11 @@ async function panelExtendForClient(
     }
     if ((own.integrationMode ?? "propria") === "vinculada") {
       // Integração vinculada = um painel cadastrado na aba Integrações
-      // (provider WPlay) desta mesma conta. Ela fornece URL, usuário e
-      // senha do painel; a chamada de extensão usa a configuração de
-      // API/extensão salva neste servidor apontando para essa URL.
+      // (provider WPlay ou Sigma) desta mesma conta. WPlay fornece
+      // URL, usuário e senha do painel; a chamada de extensão usa a
+      // configuração de API/extensão salva neste servidor apontando
+      // para essa URL. Sigma fornece a base da API e o token Bearer;
+      // a extensão usa a API de revendedor (busca + /renew).
       const linkedRows = own.panelIntegrationId != null
         ? await db
             .select()
@@ -1497,6 +1932,29 @@ async function panelExtendForClient(
           },
         };
       }
+      if ((linked.provider ?? "wplay") === "sigma") {
+        if (!linked.apiToken || own.apiVerified !== 1) {
+          return {
+            panelServer: null,
+            extend: {
+              ok: false,
+              detail: `A integração Sigma “${linked.name}” está vinculada ao servidor “${own.name}”, mas nenhum token da API Sigma está salvo nela ou o teste de conexão ainda não passou para este servidor — a renovação fica pendente e nenhum crédito foi consumido. Salve o token na integração e toque em “Testar conexão” neste servidor.`,
+            },
+          };
+        }
+        const effective = {
+          ...own,
+          panelProvider: "sigma",
+          apiBase: linked.apiBase,
+          apiToken: linked.apiToken,
+        };
+        const extend = await panelExtendUser(effective, {
+          iptvUser: client.iptvUser,
+          iptvPass: client.iptvPass,
+          days,
+        });
+        return { panelServer: own, extend };
+      }
       if (!own.apiToken || own.apiVerified !== 1) {
         return {
           panelServer: null,
@@ -1508,6 +1966,7 @@ async function panelExtendForClient(
       }
       const effective = {
         ...own,
+        panelProvider: "wplay",
         panelUrl: linked.url,
         panelUser: linked.panelUser,
         panelPass: linked.panelPass,
@@ -1948,6 +2407,7 @@ const stateResponse = z.object({
       chargeByScreens: z.boolean(),
       notes: z.string(),
       active: z.boolean(),
+      panelProvider: z.string(),
       integrationMode: z.string(),
       integrationServerId: z.number().nullable(),
       panelIntegrationId: z.number().nullable(),
@@ -1982,6 +2442,8 @@ const stateResponse = z.object({
       url: z.string(),
       panelUser: z.string(),
       hasPass: z.boolean(),
+      apiBase: z.string(),
+      hasApiToken: z.boolean(),
       status: z.string(),
       testDetail: z.string(),
       testedAt: z.string().nullable(),
@@ -2168,8 +2630,8 @@ const BACKUP_DATE_FIELDS: Record<string, string[]> = {
 
 const BACKUP_COLUMNS: Record<string, string[]> = {
   account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
-  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
-  integrations: ["provider", "name", "url", "panelUser", "panelPass", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
+  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
+  integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
   serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
   plans: ["name", "days", "priceCents", "createdAt"],
   clients: ["name", "whatsapp", "iptvUser", "iptvPass", "serverId", "planId", "priceOverrideCents", "expiresAt", "status", "isTest", "referredBy", "app", "device", "screens", "source", "extraPanel", "listState", "invoiceToken", "createdAt"],
@@ -2450,6 +2912,7 @@ export const Actions = {
           chargeByScreens: x.chargeByScreens === 1,
           notes: x.notes ?? "",
           active: x.active !== 0,
+          panelProvider: x.panelProvider ?? "wplay",
           integrationMode: x.integrationMode ?? "propria",
           integrationServerId: x.integrationServerId ?? null,
           panelIntegrationId: x.panelIntegrationId ?? null,
@@ -2595,6 +3058,8 @@ export const Actions = {
           url: x.url,
           panelUser: x.panelUser,
           hasPass: x.panelPass.length > 0,
+          apiBase: x.apiBase ?? "",
+          hasApiToken: x.apiToken.length > 0,
           status: x.status,
           testDetail: x.testDetail,
           testedAt: x.testedAt ? new Date(x.testedAt).toISOString() : null,
@@ -2844,6 +3309,10 @@ export const Actions = {
         integrationMode === "vinculada"
           ? keep(args.panelIntegrationId, existing?.panelIntegrationId, null)
           : null;
+      // O provedor do painel segue a integração vinculada (WPlay ou
+      // Sigma); sem vínculo, o servidor mantém o provedor que já
+      // tinha (servidor novo nasce "wplay", o padrão do banco).
+      let linkedProvider: string | null = null;
       if (integrationMode === "vinculada") {
         if (!panelIntegrationId) {
           throw new Error("Selecione qual integração de painel vincular, ou escolha “API deste servidor”.");
@@ -2855,6 +3324,7 @@ export const Actions = {
         if (!intRows[0] || intRows[0].ownerId !== ownerId) {
           throw new Error("Integração de painel não encontrada nesta conta.");
         }
+        linkedProvider = intRows[0].provider ?? "wplay";
       }
 
       const apiBaseRaw = keepText(args.apiBase, existing?.apiBase);
@@ -2888,6 +3358,7 @@ export const Actions = {
         notes: keepText(args.notes, existing?.notes),
         integrationMode,
         panelIntegrationId,
+        ...(linkedProvider ? { panelProvider: linkedProvider } : {}),
         // No cadastro simples (sem o campo), a renovação automática já
         // nasce ligada para usar esta conexão; nas Opções avançadas o
         // interruptor manda.
@@ -3098,6 +3569,34 @@ export const Actions = {
       const server = rows[0];
       const ownerId = await requireAccount(ctx, args.session);
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
+      // Sigma (via integração vinculada ou provedor do próprio
+      // servidor): o teste é GET /me com o token Bearer da
+      // integração/servidor. WPlay: o teste de sempre, com usuário e
+      // senha do painel e a base embutida.
+      const linkedRows = server.integrationMode === "vinculada" && server.panelIntegrationId != null
+        ? await db
+            .select()
+            .from(schema.integrations)
+            .where(eq(schema.integrations.id, server.panelIntegrationId))
+        : [];
+      const linked = linkedRows[0];
+      const provider = linked?.provider ?? server.panelProvider ?? "wplay";
+      if (provider === "sigma") {
+        const result = await sigmaTestConnection(
+          linked?.apiBase || server.apiBase || DEFAULT_SIGMA_API_BASE,
+          linked?.apiToken || server.apiToken,
+        );
+        await db
+          .update(schema.servers)
+          .set({
+            apiVerified: result.connected ? 1 : 0,
+            apiStatusDetail: result.detail,
+            apiDiagnostic: JSON.stringify(result.diagnostic),
+          })
+          .where(eq(schema.servers.id, server.id));
+        ctx.invalidateQueries();
+        return { connected: result.connected, detail: result.detail, diagnostic: result.diagnostic };
+      }
       // A API pede usuário e senha do painel: o teste envia os salvos
       // neste servidor (e o token, se houver). A base da API já vem
       // embutida no gestor (resolvePanelApiBase). Se a API emitir um
@@ -3150,10 +3649,19 @@ export const Actions = {
       const ownerId = await requireAccount(ctx, args.session);
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
       if (server.apiVerified !== 1) {
+        const linkedGateRows = server.integrationMode === "vinculada" && server.panelIntegrationId != null
+          ? await db
+              .select()
+              .from(schema.integrations)
+              .where(eq(schema.integrations.id, server.panelIntegrationId))
+          : [];
+        const gateProvider = linkedGateRows[0]?.provider ?? server.panelProvider ?? "wplay";
         return {
           extended: false,
           detail:
-            "Antes do teste de extensão, toque em “Testar conexão” até a autenticação da API passar (ela usa o usuário e a senha do painel salvos neste servidor e guarda o token emitido, se houver). Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
+            gateProvider === "sigma"
+              ? "Antes do teste de extensão, toque em “Testar conexão” até a autenticação da API Sigma passar (ela usa o token Bearer salvo na integração Sigma). Nenhuma extensão foi tentada e nenhum crédito foi consumido."
+              : "Antes do teste de extensão, toque em “Testar conexão” até a autenticação da API passar (ela usa o usuário e a senha do painel salvos neste servidor e guarda o token emitido, se houver). Nenhuma extensão foi tentada e nenhum crédito foi consumido.",
           newExpiresAt: null,
         };
       }
@@ -3170,7 +3678,21 @@ export const Actions = {
           newExpiresAt: null,
         };
       }
-      const result = await panelExtendUser(server, {
+      // Sigma vinculada: a extensão usa base + token da integração,
+      // não os campos do próprio servidor. WPlay: o servidor como
+      // está (comportamento de antes, sem mudar nada).
+      let effectiveServer = server;
+      if (server.integrationMode === "vinculada" && server.panelIntegrationId != null) {
+        const linkedRows = await db
+          .select()
+          .from(schema.integrations)
+          .where(eq(schema.integrations.id, server.panelIntegrationId));
+        const linked = linkedRows[0];
+        if (linked && linked.provider === "sigma") {
+          effectiveServer = { ...server, panelProvider: "sigma", apiBase: linked.apiBase, apiToken: linked.apiToken };
+        }
+      }
+      const result = await panelExtendUser(effectiveServer, {
         iptvUser: client.iptvUser,
         iptvPass: client.iptvPass,
         days: plan.days,
@@ -5578,23 +6100,18 @@ export const Actions = {
     request: z.object({
       session: sessionField,
       id: z.number().int().positive().optional(),
+      provider: z.enum(["wplay", "sigma"]).optional(),
       name: z.string().min(1).max(120),
-      url: z.string().min(1).max(500),
-      panelUser: z.string().min(1).max(200),
-      panelPass: z.string().max(300),
+      url: z.string().min(1).max(500).optional(),
+      panelUser: z.string().max(200).optional(),
+      panelPass: z.string().max(300).optional(),
+      apiBase: z.string().max(500).optional(),
+      apiToken: z.string().max(500).optional(),
     }),
     response: z.object({ id: z.number() }),
     async handler(ctx, args) {
       const ownerId = await requireAccount(ctx, args.session);
       const db = ctx.db<typeof schema>();
-      let url = args.url.trim();
-      if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
-      url = url.replace(/\/+$/, "");
-      const values = {
-        name: args.name.trim(),
-        url,
-        panelUser: args.panelUser.trim(),
-      };
       if (args.id) {
         const rows = await db
           .select()
@@ -5604,23 +6121,90 @@ export const Actions = {
         if (!existing || existing.ownerId !== ownerId) {
           throw new Error("Integração não encontrada nesta conta.");
         }
+        // O provedor é fixo desde a criação: trocar de WPlay para
+        // Sigma (ou o contrário) é criar uma integração nova — assim
+        // nenhuma credencial de um tipo vira credencial do outro.
+        const provider = existing.provider ?? "wplay";
+        if (provider === "sigma") {
+          const base = normalizeSigmaApiBase(args.apiBase ?? existing.apiBase);
+          if (!base.valid) throw new Error(`Base da API Sigma inválida: ${base.error}`);
+          const token =
+            args.apiToken !== undefined && args.apiToken.trim()
+              ? args.apiToken.trim()
+              : existing.apiToken;
+          let origin = base.normalized;
+          try {
+            origin = new URL(base.normalized).origin;
+          } catch {}
+          await db
+            .update(schema.integrations)
+            .set({ name: args.name.trim(), url: origin, apiBase: base.normalized, apiToken: token })
+            .where(eq(schema.integrations.id, args.id));
+          ctx.invalidateQueries();
+          return { id: args.id };
+        }
+        let url = (args.url ?? existing.url).trim();
+        if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
+        url = url.replace(/\/+$/, "");
         await db
           .update(schema.integrations)
           .set({
-            ...values,
+            name: args.name.trim(),
+            url,
+            panelUser: (args.panelUser ?? existing.panelUser).trim(),
             panelPass: args.panelPass ? args.panelPass : existing.panelPass,
           })
           .where(eq(schema.integrations.id, args.id));
         ctx.invalidateQueries();
         return { id: args.id };
       }
+      const provider = args.provider === "sigma" ? "sigma" : "wplay";
+      if (provider === "sigma") {
+        const base = normalizeSigmaApiBase(args.apiBase ?? "");
+        if (!base.valid) throw new Error(`Base da API Sigma inválida: ${base.error}`);
+        const token = (args.apiToken ?? "").trim();
+        if (!token) {
+          throw new Error(
+            "Informe o token da API Sigma, criado na página de API de revendedor do painel. O token aparece escrito uma só vez no painel, na hora de criar.",
+          );
+        }
+        let origin = base.normalized;
+        try {
+          origin = new URL(base.normalized).origin;
+        } catch {}
+        const inserted = await db
+          .insert(schema.integrations)
+          .values({
+            ownerId,
+            provider: "sigma",
+            name: args.name.trim(),
+            url: origin,
+            panelUser: "",
+            panelPass: "",
+            apiBase: base.normalized,
+            apiToken: token,
+          })
+          .returning({ id: schema.integrations.id });
+        const row = inserted[0];
+        if (!row) throw new Error("saveIntegration: insert returned no rows");
+        ctx.invalidateQueries();
+        return { id: row.id };
+      }
+      if (!args.url?.trim() || !args.panelUser?.trim()) {
+        throw new Error("Informe a URL do servidor e o usuário do painel.");
+      }
       if (!args.panelPass) throw new Error("Informe a senha do painel.");
+      let url = args.url.trim();
+      if (url && !/^https?:\/\//i.test(url)) url = `https://${url}`;
+      url = url.replace(/\/+$/, "");
       const inserted = await db
         .insert(schema.integrations)
         .values({
           ownerId,
           provider: "wplay",
-          ...values,
+          name: args.name.trim(),
+          url,
+          panelUser: args.panelUser.trim(),
           panelPass: args.panelPass,
         })
         .returning({ id: schema.integrations.id });
@@ -5649,9 +6233,10 @@ export const Actions = {
       }
       // Servidores vinculados a ela voltam para "sem integração" —
       // nada fica apontando para uma integração que não existe mais.
+      // O provedor volta a "wplay", o padrão dos servidores.
       await db
         .update(schema.servers)
-        .set({ panelIntegrationId: null, integrationMode: "nenhuma" })
+        .set({ panelIntegrationId: null, integrationMode: "nenhuma", panelProvider: "wplay" })
         .where(eq(schema.servers.panelIntegrationId, args.id));
       await db
         .delete(schema.integrations)
@@ -5680,6 +6265,21 @@ export const Actions = {
       const integration = rows[0];
       if (!integration || integration.ownerId !== ownerId) {
         throw new Error("Integração não encontrada nesta conta.");
+      }
+      // Sigma: o teste é GET /me com o token Bearer — o mesmo teste
+      // usado em Servidores. WPlay: o teste de sempre, pela página.
+      if ((integration.provider ?? "wplay") === "sigma") {
+        const result = await sigmaTestConnection(
+          integration.apiBase || DEFAULT_SIGMA_API_BASE,
+          integration.apiToken,
+        );
+        const status = result.connected ? "ativo" : "falhou";
+        await db
+          .update(schema.integrations)
+          .set({ status, testDetail: result.detail, testedAt: Date.now() })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { status, detail: result.detail };
       }
       const probe = await probePanelUrl(integration.url);
       let loginNote = "";
@@ -5721,6 +6321,24 @@ export const Actions = {
       if (!integration || integration.ownerId !== ownerId) {
         throw new Error("Integração não encontrada nesta conta.");
       }
+      // Info Painel só existe para WPlay. Na Sigma, o “Testar
+      // conexão” já mostra usuário e saldo de créditos.
+      if ((integration.provider ?? "wplay") === "sigma") {
+        const info = [
+          `Painel: ${integration.name} (Sigma/OneTV)`,
+          `Base da API: ${integration.apiBase || DEFAULT_SIGMA_API_BASE}`,
+          `Token: salvo no gestor (nunca exibido)`,
+          `Status salvo: ${integration.status}`,
+          ``,
+          `Informações detalhadas do painel (Info Painel) só existem para integrações WPlay. Para a Sigma, use “Testar conexão”: ele valida o token e mostra o usuário do painel e o saldo de créditos.`,
+        ].join("\n");
+        await db
+          .update(schema.integrations)
+          .set({ panelInfo: info })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { info };
+      }
       const probe = await probePanelUrl(integration.url);
       const info = probe.reachable
         ? [
@@ -5759,6 +6377,19 @@ export const Actions = {
       const integration = rows[0];
       if (!integration || integration.ownerId !== ownerId) {
         throw new Error("Integração não encontrada nesta conta.");
+      }
+      // Sincronização de IDs só existe para WPlay. Na Sigma, a
+      // renovação busca o cliente pelo usuário IPTV exato na API —
+      // não precisa sincronizar IDs.
+      if ((integration.provider ?? "wplay") === "sigma") {
+        const detail =
+          "A sincronização de IDs só existe para integrações WPlay. Para a Sigma, a renovação busca o cliente pelo usuário IPTV exato na API de revendedor, sem sincronizar IDs. O vínculo e o teste de conexão continuam valendo.";
+        await db
+          .update(schema.integrations)
+          .set({ syncDetail: detail, syncedAt: Date.now() })
+          .where(eq(schema.integrations.id, integration.id));
+        ctx.invalidateQueries();
+        return { detail, synced: false };
       }
       const xtream = await probeXtreamApi(integration.url, integration.panelUser, integration.panelPass);
       let detail: string;
@@ -5813,6 +6444,7 @@ export const Actions = {
         .set({
           integrationMode: "vinculada",
           panelIntegrationId: integration.id,
+          panelProvider: integration.provider ?? "wplay",
           panelUrl: integration.url,
           panelUser: integration.panelUser,
           panelPass: integration.panelPass,
