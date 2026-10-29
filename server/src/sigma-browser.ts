@@ -12,10 +12,12 @@
 //   navegador sempre fechado em `finally`.
 // - NENHUM clique em Renovar, confirmar, salvar ou qualquer ação que
 //   mude dados ou gaste crédito. Os ÚNICOS cliques deste módulo são:
-//   (1) o botão de enviar do formulário de login e (2) o botão que
-//   abre o menu "Ações" da linha do cliente. O menu é fechado com a
-//   tecla Escape. O clique real no "Renovar" fica para uma etapa
-//   futura, com autorização separada e cliente escolhido.
+//   (1) o botão "Fazer login com outra conta", quando a tela de
+//   login salvo aparece; (2) o botão "Continuar" (envio do login) e
+//   (3) o botão que abre o menu "Ações" da linha do cliente. O menu
+//   é fechado com a tecla Escape. O clique real no "Renovar" fica
+//   para uma etapa futura, com autorização separada e cliente
+//   escolhido.
 // - Nenhum retry automático, nenhuma repetição: bloqueio (captcha /
 //   Cloudflare / anti-automação), login recusado, cliente não
 //   encontrado ou botão ausente viram motivo em linguagem simples.
@@ -49,6 +51,10 @@ export type SigmaBrowserLocateInput = {
 
 const TOTAL_TIMEOUT_MS = 60_000;
 const STEP_TIMEOUT_MS = 12_000;
+// Espera pelo carregamento do SPA na tela de login: a página fica em
+// branco com spinner por vários segundos (observado até ~15s) antes
+// de exibir o seletor de login salvo ou o formulário.
+const LOGIN_SCREEN_TIMEOUT_MS = 30_000;
 
 // Sinais de bloqueio por automação/captcha na página (só leitura do
 // texto — nenhum deles é devolvido na resposta).
@@ -113,6 +119,27 @@ async function pageShowsBlock(page: {
   return BLOCK_MARKERS.some((m) => text.includes(m));
 }
 
+// Localização dos campos de login POR PLACEHOLDER, com fallbacks por
+// ordem. A tela real do painel NÃO tem rótulos visíveis nos campos:
+// o campo 1 usa o placeholder "Usuário ou E-mail" e o campo 2 usa o
+// placeholder "Senha". Um único seletor rígido quebraria à toa — por
+// isso a ordem é: placeholder → label associada → tipo do input.
+async function locateLoginUserField(page: import("playwright").Page) {
+  const byPlaceholder = page.getByPlaceholder(/usuário ou e-mail/i);
+  if ((await byPlaceholder.count().catch(() => 0)) > 0) return byPlaceholder.first();
+  const byLabel = page.getByLabel(/usuário|e-mail/i);
+  if ((await byLabel.count().catch(() => 0)) > 0) return byLabel.first();
+  return page
+    .locator('input:not([type="password"]):not([type="checkbox"]):not([type="hidden"]):not([type="submit"]):visible')
+    .first();
+}
+
+async function locateLoginPasswordField(page: import("playwright").Page) {
+  const byPlaceholder = page.getByPlaceholder(/senha/i);
+  if ((await byPlaceholder.count().catch(() => 0)) > 0) return byPlaceholder.first();
+  return page.locator('input[type="password"]:visible').first();
+}
+
 export async function locateSigmaRenewButton(
   input: SigmaBrowserLocateInput,
 ): Promise<SigmaBrowserLocateResult> {
@@ -164,7 +191,11 @@ export async function locateSigmaRenewButton(
       const page = await context.newPage();
       page.setDefaultTimeout(STEP_TIMEOUT_MS);
 
-      // 1) Tela de login.
+      // 1) Tela de login. O SPA demora para montar (branco + spinner
+      // por vários segundos, observado até ~15s) e a primeira tela
+      // NÃO é o formulário: é um seletor de login salvo. Por isso se
+      // espera o seletor OU o formulário aparecer, com folga, em vez
+      // de procurar os campos de imediato.
       try {
         await page.goto(`${origin}/#/sign-in?redirect=/dashboard`, {
           waitUntil: "domcontentloaded",
@@ -183,14 +214,69 @@ export async function locateSigmaRenewButton(
         );
       }
 
+      const savedLoginButton = page.getByRole("button", { name: /fazer login com outra conta/i });
+      const userByPlaceholder = page.getByPlaceholder(/usuário ou e-mail/i);
+      const loginScreenReady = await savedLoginButton
+        .or(userByPlaceholder)
+        .first()
+        .waitFor({ state: "visible", timeout: LOGIN_SCREEN_TIMEOUT_MS })
+        .then(() => true)
+        .catch(() => false);
+      if (!loginScreenReady) {
+        // A tela de bloqueio pode renderizar depois do carregamento
+        // inicial (o SPA monta devagar): re-checar antes de concluir
+        // que os campos simplesmente não vieram.
+        if (await pageShowsBlock(page)) {
+          return result(
+            "bloqueado",
+            "O painel barrou a automação (tela de verificação/bloqueio), por isso não foi possível nem entrar. Tente de novo mais tarde ou use o caminho do token da API Sigma. Nenhum crédito foi consumido.",
+          );
+        }
+        return result(
+          "erro",
+          "A tela de login do painel não trouxe os campos de usuário e senha do jeito esperado, por isso a localização parou antes de entrar. Nenhum crédito foi consumido.",
+        );
+      }
+      if (await pageShowsBlock(page)) {
+        return result(
+          "bloqueado",
+          "O painel barrou a automação (tela de verificação/bloqueio), por isso não foi possível nem entrar. Tente de novo mais tarde ou use o caminho do token da API Sigma. Nenhum crédito foi consumido.",
+        );
+      }
+
+      // Se o seletor de login salvo apareceu, clicar em "Fazer login
+      // com outra conta" — clique que só troca a tela, não entra em
+      // conta nenhuma — e aguardar o formulário aparecer.
+      const savedLoginVisible =
+        (await savedLoginButton.count().catch(() => 0)) > 0 &&
+        (await savedLoginButton.first().isVisible().catch(() => false));
+      if (savedLoginVisible) {
+        await savedLoginButton.first().click({ timeout: STEP_TIMEOUT_MS });
+        const formReady = await userByPlaceholder
+          .first()
+          .waitFor({ state: "visible", timeout: STEP_TIMEOUT_MS })
+          .then(() => true)
+          .catch(() => false);
+        if (!formReady) {
+          if (await pageShowsBlock(page)) {
+            return result(
+              "bloqueado",
+              "O painel barrou a automação (tela de verificação/bloqueio), por isso não foi possível nem entrar. Tente de novo mais tarde ou use o caminho do token da API Sigma. Nenhum crédito foi consumido.",
+            );
+          }
+          return result(
+            "erro",
+            "A tela de login do painel não trouxe os campos de usuário e senha do jeito esperado, por isso a localização parou antes de entrar. Nenhum crédito foi consumido.",
+          );
+        }
+      }
+
       // 2) Preencher login com as credenciais JÁ SALVAS no servidor.
-      // Os campos são procurados de forma genérica (a tela observada
-      // tem usuário + senha + botão de enviar); nenhum valor digitado
-      // é registrado ou devolvido.
-      const passwordField = page.locator('input[type="password"]:visible').first();
-      const userField = page
-        .locator('input:not([type="password"]):not([type="checkbox"]):not([type="hidden"]):not([type="submit"]):visible')
-        .first();
+      // Campos localizados por placeholder (sem rótulo visível), com
+      // fallbacks por ordem. Nenhum valor digitado é registrado ou
+      // devolvido.
+      const userField = await locateLoginUserField(page);
+      const passwordField = await locateLoginPasswordField(page);
       if ((await userField.count()) === 0 || (await passwordField.count()) === 0) {
         return result(
           "erro",
@@ -199,13 +285,20 @@ export async function locateSigmaRenewButton(
       }
       await userField.fill(input.panelUser);
       await passwordField.fill(input.panelPass);
-      const submit = page.locator('button[type="submit"]:visible').first();
-      if ((await submit.count()) > 0) {
-        // ÚNICO clique de envio deste módulo: entrar no painel. Não
-        // é ação sobre cliente nenhum e não gasta crédito.
-        await submit.click({ timeout: STEP_TIMEOUT_MS });
+      // Enviar clicando em "Continuar" — botão principal da tela
+      // real (não há botão "Entrar"/"Login") — com fallback para o
+      // submit do formulário. Clique de envio: entrar no painel. Não
+      // é ação sobre cliente nenhum e não gasta crédito.
+      const continueButton = page.getByRole("button", { name: /continuar/i }).first();
+      if ((await continueButton.count()) > 0) {
+        await continueButton.click({ timeout: STEP_TIMEOUT_MS });
       } else {
-        await passwordField.press("Enter");
+        const submit = page.locator('button[type="submit"]:visible').first();
+        if ((await submit.count()) > 0) {
+          await submit.click({ timeout: STEP_TIMEOUT_MS });
+        } else {
+          await passwordField.press("Enter");
+        }
       }
 
       // 3) Aguardar o dashboard (ou a lista) — prova de login. O
@@ -281,7 +374,7 @@ export async function locateSigmaRenewButton(
         }
       }
 
-      // 6) Abrir o menu "Ações" da linha — SEGUNDO E ÚLTIMO clique
+      // 6) Abrir o menu "Ações" da linha — TERCEIRO E ÚLTIMO clique
       // permitido nesta etapa: só abre o menu. O item "Renovar" NÃO
       // é clicado em hipótese alguma (verificação só de existência).
       const actionsTrigger = row
