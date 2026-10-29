@@ -56,9 +56,10 @@ export async function createDb(): Promise<Db> {
  *  de uma automação removida do gestor a pedido da dona; o código não
  *  usa mais essas colunas, mas o esquema e o formato do backup ainda
  *  as incluem — por isso elas continuam aplicadas (sem efeito em
- *  bancos que já as têm). */
+ *  bancos que já as têm). A migration 006 adiciona o segredo da API
+ *  TopSul (api_secret) às integrações. */
 export async function migrate(db: Db): Promise<void> {
-  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql"]) {
+  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql", "006_topsul.sql"]) {
     const sqlText = readFileSync(
       join(import.meta.dir, "..", "..", "migrations", file),
       "utf8",
