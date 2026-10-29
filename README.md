@@ -1,4 +1,4 @@
-# Gestor IPTV — versão externa (fora do Muse)
+# Gestor Flex — versão externa (fora do Muse)
 
 Versão standalone do gestor, para rodar fora do Muse (ex.: Render
 Free), **sem tocar no artefato original** em

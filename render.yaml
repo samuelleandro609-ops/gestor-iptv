@@ -1,4 +1,4 @@
-# Gestor IPTV — deploy no Render (Blueprint, caminho ÚNICO).
+# Gestor Flex — deploy no Render (Blueprint, caminho ÚNICO).
 # No Render: New → Blueprint → conecte o repositório GitHub do projeto.
 # NÃO crie o Postgres manualmente antes: o Blueprint abaixo já cria o
 # banco gestor-iptv-db e liga a DATABASE_URL ao serviço. Criar um

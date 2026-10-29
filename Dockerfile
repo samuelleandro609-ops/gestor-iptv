@@ -1,4 +1,4 @@
-# Gestor IPTV — versão externa (fora do Muse)
+# Gestor Flex — versão externa (fora do Muse)
 # Imagem Bun + Node: o Bun roda o servidor e compila o cliente; o Node
 # é necessário SOMENTE para o processo filho da sessão do WhatsApp
 # (Baileys), herdado do gestor original. Se o Node não estiver

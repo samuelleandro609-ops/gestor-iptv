@@ -1,4 +1,4 @@
-# Hospedagem do Gestor IPTV fora do Muse — Render (gratuito para começar)
+# Hospedagem do Gestor Flex fora do Muse — Render (gratuito para começar)
 
 ## Por que hospedar fora do Muse
 
