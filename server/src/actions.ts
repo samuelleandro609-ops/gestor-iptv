@@ -2,6 +2,7 @@ import { z } from "zod";
 import QRCode from "qrcode";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
+import { locateSigmaRenewButton } from "./sigma-browser";
 import { asc, desc, eq, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
@@ -2390,6 +2391,9 @@ const stateResponse = z.object({
       panelConnected: z.boolean(),
       panelConnectionDetail: z.string(),
       panelConnectionTestedAt: z.string().nullable(),
+      browserLocateFound: z.boolean(),
+      browserLocateDetail: z.string(),
+      browserLocateTestedAt: z.string().nullable(),
       apiBase: z.string(),
       hasApiToken: z.boolean(),
       apiVerified: z.boolean(),
@@ -2630,7 +2634,7 @@ const BACKUP_DATE_FIELDS: Record<string, string[]> = {
 
 const BACKUP_COLUMNS: Record<string, string[]> = {
   account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
-  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
+  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
   integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
   serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
   plans: ["name", "days", "priceCents", "createdAt"],
@@ -2894,6 +2898,11 @@ export const Actions = {
           panelConnectionDetail: x.panelConnectionDetail ?? "",
           panelConnectionTestedAt: x.panelConnectionTestedAt
             ? new Date(x.panelConnectionTestedAt).toISOString()
+            : null,
+          browserLocateFound: (x.browserLocateFound ?? 0) === 1,
+          browserLocateDetail: x.browserLocateDetail ?? "",
+          browserLocateTestedAt: x.browserLocateTestedAt
+            ? new Date(x.browserLocateTestedAt).toISOString()
             : null,
           apiBase: x.apiBase,
           hasApiToken: x.apiToken.length > 0,
@@ -3719,6 +3728,95 @@ export const Actions = {
         detail: `${result.detail} A renovação foi registrada no gestor e o vencimento do cliente foi atualizado.`,
         newExpiresAt: applied.newExpires.toISOString(),
       };
+    },
+  }),
+
+  // ETAPA 1 — localizar (SÓ LEITURA) o botão "Renovar" do painel
+  // Sigma por navegador automatizado, para servidores Sigma SEM token
+  // salvo (modo sessão: link + usuário + senha do painel). Abre o
+  // painel, entra com as credenciais JÁ SALVAS no servidor, procura o
+  // cliente na lista e verifica se o item "Renovar" existe no menu
+  // "Ações" — e fecha SEM CLICAR em Renovar, confirmar ou salvar.
+  // Nada é renovado e nenhum crédito é consumido. Uma única
+  // tentativa, com limite de 60 segundos. Se o servidor já tem token
+  // da API Sigma (no próprio servidor ou na integração vinculada), a
+  // localização é recusada: o caminho do token é o oficial.
+  testSigmaBrowserLocate: defineAction({
+    request: z.object({
+      session: sessionField,
+      serverId: z.number().int().positive(),
+      clientId: z.number().int().positive(),
+    }),
+    response: z.object({
+      found: z.boolean(),
+      detail: z.string(),
+      testedAt: z.string(),
+    }),
+    async handler(ctx, args) {
+      const db = ctx.db<typeof schema>();
+      const serverRows = await db
+        .select()
+        .from(schema.servers)
+        .where(eq(schema.servers.id, args.serverId));
+      const server = serverRows[0];
+      const ownerId = await requireAccount(ctx, args.session);
+      if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
+      const linkedRows =
+        server.integrationMode === "vinculada" && server.panelIntegrationId != null
+          ? await db
+              .select()
+              .from(schema.integrations)
+              .where(eq(schema.integrations.id, server.panelIntegrationId))
+          : [];
+      const linked = linkedRows[0];
+      const provider = linked?.provider ?? server.panelProvider ?? "wplay";
+      if (provider !== "sigma") {
+        return {
+          found: false,
+          detail:
+            "A localização do botão Renovar só existe para servidores Sigma sem token salvo. Este servidor não é Sigma.",
+          testedAt: new Date().toISOString(),
+        };
+      }
+      const hasToken = (linked?.apiToken ?? server.apiToken ?? "").trim().length > 0;
+      if (hasToken) {
+        return {
+          found: false,
+          detail:
+            "Este servidor já usa o token da API Sigma, que é o caminho oficial de renovação. A localização do botão pela tela só existe para servidores Sigma sem token salvo.",
+          testedAt: new Date().toISOString(),
+        };
+      }
+      const clientRows = await db
+        .select()
+        .from(schema.clients)
+        .where(eq(schema.clients.id, args.clientId));
+      const client = clientRows[0];
+      if (!client || client.ownerId !== ownerId) throw new Error("Cliente não encontrado nesta conta.");
+      if (client.listState !== "normal") {
+        return {
+          found: false,
+          detail:
+            "Este cliente está arquivado ou na lixeira, por isso o botão Renovar não pode ser localizado para ele. Restaure o cliente na aba Clientes para localizar de novo. Nenhum crédito foi consumido.",
+          testedAt: new Date().toISOString(),
+        };
+      }
+      const result = await locateSigmaRenewButton({
+        panelUrl: server.panelUrl,
+        panelUser: server.panelUser,
+        panelPass: server.panelPass,
+        iptvUser: client.iptvUser,
+      });
+      await db
+        .update(schema.servers)
+        .set({
+          browserLocateFound: result.found ? 1 : 0,
+          browserLocateDetail: result.detail,
+          browserLocateTestedAt: Date.parse(result.testedAt),
+        })
+        .where(eq(schema.servers.id, server.id));
+      ctx.invalidateQueries();
+      return { found: result.found, detail: result.detail, testedAt: result.testedAt };
     },
   }),
 
@@ -6101,6 +6199,10 @@ export const Actions = {
       session: sessionField,
       id: z.number().int().positive().optional(),
       provider: z.enum(["wplay", "sigma"]).optional(),
+      // Sigma: "token" usa a API de revendedor (Bearer); "login" é o
+      // modo sessão — sem token, com link + usuário + senha do painel
+      // (o mesmo que o outro gestor pede). Só vale para Sigma.
+      sigmaMode: z.enum(["token", "login"]).optional(),
       name: z.string().min(1).max(120),
       url: z.string().min(1).max(500).optional(),
       panelUser: z.string().max(200).optional(),
@@ -6126,6 +6228,33 @@ export const Actions = {
         // nenhuma credencial de um tipo vira credencial do outro.
         const provider = existing.provider ?? "wplay";
         if (provider === "sigma") {
+          // Modo sessão ("login"): sem token — link + usuário + senha
+          // do painel. Trocar para ele APAGA o token salvo (o caminho
+          // da tela passa a ser o da localização do botão Renovar).
+          if (args.sigmaMode === "login") {
+            let panelUrl = (args.url ?? existing.url).trim();
+            if (panelUrl && !/^https?:\/\//i.test(panelUrl)) panelUrl = `https://${panelUrl}`;
+            panelUrl = panelUrl.replace(/\/+$/, "");
+            if (!panelUrl) throw new Error("Informe o link do painel.");
+            const user = (args.panelUser ?? existing.panelUser).trim();
+            if (!user) throw new Error("Informe o usuário do painel.");
+            const pass = args.panelPass ? args.panelPass : existing.panelPass;
+            if (!pass) throw new Error("Informe a senha do painel.");
+            const base = normalizeSigmaApiBase(args.apiBase ?? existing.apiBase ?? "");
+            await db
+              .update(schema.integrations)
+              .set({
+                name: args.name.trim(),
+                url: panelUrl,
+                panelUser: user,
+                panelPass: pass,
+                apiBase: base.valid ? base.normalized : DEFAULT_SIGMA_API_BASE,
+                apiToken: "",
+              })
+              .where(eq(schema.integrations.id, args.id));
+            ctx.invalidateQueries();
+            return { id: args.id };
+          }
           const base = normalizeSigmaApiBase(args.apiBase ?? existing.apiBase);
           if (!base.valid) throw new Error(`Base da API Sigma inválida: ${base.error}`);
           const token =
@@ -6160,6 +6289,38 @@ export const Actions = {
       }
       const provider = args.provider === "sigma" ? "sigma" : "wplay";
       if (provider === "sigma") {
+        // Modo sessão ("login"): o outro gestor pede SÓ nome + URL +
+        // usuário + senha, sem token. O token fica vazio; a base da
+        // API fica guardada só para uma futura troca para o modo
+        // token. A renovação por este caminho é a localização do
+        // botão Renovar na tela (etapa 1: só localizar).
+        if (args.sigmaMode === "login") {
+          let panelUrl = (args.url ?? "").trim();
+          if (panelUrl && !/^https?:\/\//i.test(panelUrl)) panelUrl = `https://${panelUrl}`;
+          panelUrl = panelUrl.replace(/\/+$/, "");
+          if (!panelUrl) throw new Error("Informe o link do painel.");
+          const user = (args.panelUser ?? "").trim();
+          if (!user) throw new Error("Informe o usuário do painel.");
+          if (!args.panelPass) throw new Error("Informe a senha do painel.");
+          const base = normalizeSigmaApiBase(args.apiBase ?? "");
+          const inserted = await db
+            .insert(schema.integrations)
+            .values({
+              ownerId,
+              provider: "sigma",
+              name: args.name.trim(),
+              url: panelUrl,
+              panelUser: user,
+              panelPass: args.panelPass,
+              apiBase: base.valid ? base.normalized : DEFAULT_SIGMA_API_BASE,
+              apiToken: "",
+            })
+            .returning({ id: schema.integrations.id });
+          const row = inserted[0];
+          if (!row) throw new Error("Não foi possível salvar a integração.");
+          ctx.invalidateQueries();
+          return { id: row.id };
+        }
         const base = normalizeSigmaApiBase(args.apiBase ?? "");
         if (!base.valid) throw new Error(`Base da API Sigma inválida: ${base.error}`);
         const token = (args.apiToken ?? "").trim();
