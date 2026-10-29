@@ -2362,6 +2362,31 @@ const panelTestResponse = z.object({
   diagnostic: panelDiagnosticSchema,
 });
 
+// Diagnóstico rico da localização do botão Renovar por navegador
+// (só leitura): espelha o tipo SigmaBrowserLocateDiagnostic de
+// sigma-browser.ts. O trecho (snippet) já vem sanitizado do módulo
+// do navegador — nunca inclui credencial.
+const browserLocateDiagnosticSchema = z.object({
+  stage: z.string(),
+  elapsedMs: z.number(),
+  stepTimesMs: z.record(z.string(), z.number()),
+  pageTitle: z.string(),
+  pagePath: z.string(),
+  visibleTextLength: z.number(),
+  flags: z.record(z.string(), z.boolean()),
+  snippet: z.string(),
+});
+
+function parseBrowserLocateDiagnostic(raw: string): z.infer<typeof browserLocateDiagnosticSchema> | null {
+  if (!raw) return null;
+  try {
+    const parsed = browserLocateDiagnosticSchema.safeParse(JSON.parse(raw) as unknown);
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
+}
+
 function parsePanelDiagnostic(raw: string): z.infer<typeof panelDiagnosticSchema> | null {
   if (!raw) return null;
   try {
@@ -2394,6 +2419,7 @@ const stateResponse = z.object({
       browserLocateFound: z.boolean(),
       browserLocateDetail: z.string(),
       browserLocateTestedAt: z.string().nullable(),
+      browserLocateDiagnostic: browserLocateDiagnosticSchema.nullable(),
       apiBase: z.string(),
       hasApiToken: z.boolean(),
       apiVerified: z.boolean(),
@@ -2634,7 +2660,7 @@ const BACKUP_DATE_FIELDS: Record<string, string[]> = {
 
 const BACKUP_COLUMNS: Record<string, string[]> = {
   account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
-  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
+  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "browserLocateDiagnostic", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
   integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
   serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
   plans: ["name", "days", "priceCents", "createdAt"],
@@ -2904,6 +2930,7 @@ export const Actions = {
           browserLocateTestedAt: x.browserLocateTestedAt
             ? new Date(x.browserLocateTestedAt).toISOString()
             : null,
+          browserLocateDiagnostic: parseBrowserLocateDiagnostic(x.browserLocateDiagnostic ?? ""),
           apiBase: x.apiBase,
           hasApiToken: x.apiToken.length > 0,
           apiVerified: x.apiVerified === 1,
@@ -3751,6 +3778,7 @@ export const Actions = {
       found: z.boolean(),
       detail: z.string(),
       testedAt: z.string(),
+      diagnostic: z.string(),
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
@@ -3776,6 +3804,7 @@ export const Actions = {
           detail:
             "A localização do botão Renovar só existe para servidores Sigma sem token salvo. Este servidor não é Sigma.",
           testedAt: new Date().toISOString(),
+          diagnostic: "",
         };
       }
       const hasToken = (linked?.apiToken ?? server.apiToken ?? "").trim().length > 0;
@@ -3785,6 +3814,7 @@ export const Actions = {
           detail:
             "Este servidor já usa o token da API Sigma, que é o caminho oficial de renovação. A localização do botão pela tela só existe para servidores Sigma sem token salvo.",
           testedAt: new Date().toISOString(),
+          diagnostic: "",
         };
       }
       const clientRows = await db
@@ -3799,6 +3829,7 @@ export const Actions = {
           detail:
             "Este cliente está arquivado ou na lixeira, por isso o botão Renovar não pode ser localizado para ele. Restaure o cliente na aba Clientes para localizar de novo. Nenhum crédito foi consumido.",
           testedAt: new Date().toISOString(),
+          diagnostic: "",
         };
       }
       const result = await locateSigmaRenewButton({
@@ -3813,10 +3844,11 @@ export const Actions = {
           browserLocateFound: result.found ? 1 : 0,
           browserLocateDetail: result.detail,
           browserLocateTestedAt: Date.parse(result.testedAt),
+          browserLocateDiagnostic: JSON.stringify(result.diagnostic),
         })
         .where(eq(schema.servers.id, server.id));
       ctx.invalidateQueries();
-      return { found: result.found, detail: result.detail, testedAt: result.testedAt };
+      return { found: result.found, detail: result.detail, testedAt: result.testedAt, diagnostic: JSON.stringify(result.diagnostic) };
     },
   }),
 
