@@ -7059,6 +7059,76 @@ function BlockedScreen({ data, onLogout }: { data: State; onLogout: () => void }
   );
 }
 
+/* ---------------- Backup e restauração: leitura do arquivo na tela ---------------- */
+// Só lê o resumo (e-mail, data e quantidades) para mostrar na
+// confirmação — a validação de verdade acontece no servidor, que
+// recusa arquivo inválido ou de outra conta sem alterar nada.
+type BackupSummary = { email: string; exportedAt: string; counts: Record<string, string> };
+
+const BACKUP_COUNT_LABELS: Record<string, string> = {
+  servers: "servidor(es)",
+  integrations: "integração(ões)",
+  serverCreditLogs: "movimentação(ões) de crédito",
+  plans: "plano(s)",
+  clients: "cliente(s)",
+  renewals: "renovação(ões)",
+  payments: "cobrança(s)",
+  expenses: "despesa(s)",
+  coupons: "cupom(ns)",
+  settings: "configuração(ões)",
+  subscriptionPayments: "pagamento(s) de assinatura",
+};
+
+function summarizeBackupFile(text: string): { summary: BackupSummary } | { error: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: "Não foi possível ler este arquivo. Confira se é o arquivo .json do backup." };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "Este arquivo não é um backup do gestor." };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.kind !== "gestor-iptv-backup") {
+    return { error: "Este arquivo não é um backup do gestor." };
+  }
+  if (obj.version !== 2) {
+    return { error: "Este backup é de um formato antigo e não pode ser restaurado. Baixe um backup novo." };
+  }
+  if (typeof obj.ownerEmail !== "string" || !obj.ownerEmail.trim()) {
+    return { error: "Arquivo de backup inválido: falta o e-mail da administradora dona do backup." };
+  }
+  const accountEmail = obj.ownerEmail.trim();
+  const data = obj.data as Record<string, unknown> | undefined;
+  const counts: Record<string, string> = {};
+  const accountsArr = obj.accounts;
+  counts["conta(s)"] = String(Array.isArray(accountsArr) ? accountsArr.length : 0);
+  for (const [key, label] of Object.entries(BACKUP_COUNT_LABELS)) {
+    const arr = data?.[key];
+    counts[label] = String(Array.isArray(arr) ? arr.length : 0);
+  }
+  return {
+    summary: {
+      email: accountEmail,
+      exportedAt: typeof obj.exportedAt === "string" ? obj.exportedAt : "",
+      counts,
+    },
+  };
+}
+
+function downloadTextFile(name: string, text: string, type = "application/json") {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 /* ---------------- Administração (só a administradora vê) ---------------- */
 // Contas registradas, valores, liberação/bloqueio, link de redefinição
 // de senha e configurações de e-mail/valor padrão. SENHAS NUNCA SÃO
@@ -7088,6 +7158,14 @@ function AdminTab({ data }: { data: State }) {
   const [resendFrom, setResendFrom] = useState(adminSettings?.resendFrom ?? "");
   const [resendKey, setResendKey] = useState("");
   const [emailMsg, setEmailMsg] = useState<string | null>(null);
+
+  const [backupMsg, setBackupMsg] = useState<string | null>(null);
+  const [backupFileName, setBackupFileName] = useState("");
+  const [backupText, setBackupText] = useState("");
+  const [backupSummary, setBackupSummary] = useState<BackupSummary | null>(null);
+  const [backupSummaryError, setBackupSummaryError] = useState<string | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  const backupFileRef = useRef<HTMLInputElement | null>(null);
 
   function refresh() {
     queryClient.invalidateQueries({ queryKey: ["tenants"] });
@@ -7138,6 +7216,56 @@ function AdminTab({ data }: { data: State }) {
     onSuccess: (res) => setEmailMsg(res.detail),
     onError: (e) => setEmailMsg(friendlyAuthError(e)),
   });
+  const exportBackup = useMutation({
+    mutationFn: () => api.exportBackup({}),
+    onSuccess: (res) => {
+      const stamp = new Date().toISOString().slice(0, 10).replaceAll("-", "");
+      downloadTextFile(`gestor-backup-${stamp}.json`, res.backupJson);
+      setBackupMsg(
+        `Backup baixado com TODOS os dados do gestor (${res.email}), feito em ${fmtDate(res.exportedAt)}. Guarde o arquivo com cuidado: ele contém senhas e chaves.`,
+      );
+    },
+    onError: (e) => setBackupMsg(friendlyAuthError(e)),
+  });
+  const importBackup = useMutation({
+    mutationFn: (backupJson: string) => api.importBackup({ backupJson }),
+    onSuccess: (res) => {
+      setBackupMsg(
+        `Backup restaurado: TODAS as contas e dados voltaram como estavam em ${fmtDate(res.exportedAt)}.`,
+      );
+      setBackupText("");
+      setBackupFileName("");
+      setBackupSummary(null);
+      setBackupSummaryError(null);
+      setConfirmRestore(false);
+      if (backupFileRef.current) backupFileRef.current.value = "";
+      refresh();
+    },
+    onError: (e) => setBackupMsg(friendlyAuthError(e)),
+  });
+
+  async function handleBackupFile(file: File | undefined) {
+    setConfirmRestore(false);
+    setBackupSummary(null);
+    setBackupSummaryError(null);
+    if (!file) {
+      setBackupText("");
+      setBackupFileName("");
+      return;
+    }
+    const text = await file.text();
+    setBackupText(text);
+    setBackupFileName(file.name);
+    const result = summarizeBackupFile(text);
+    if ("error" in result) {
+      setBackupSummaryError(result.error);
+    } else {
+      setBackupSummary(result.summary);
+    }
+  }
+
+  const backupEmailMismatch =
+    backupSummary != null && backupSummary.email.toLowerCase() !== data.accountEmail.trim().toLowerCase();
 
   return (
     <section aria-label="Administração" className="mt-5 space-y-5 lg:mt-8">
@@ -7321,6 +7449,124 @@ function AdminTab({ data }: { data: State }) {
             </button>
           </div>
         </div>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <h3 className="font-display text-lg font-bold">Backup e restauração</h3>
+        <p className="mt-1 text-sm leading-relaxed text-[var(--dim)]">
+          O backup é a cópia de segurança de TUDO do gestor: ele salva todas as contas
+          registradas — a sua e as das outras pessoas, com os clientes, servidores, planos,
+          cobranças e configurações de cada uma — inclusive as chaves salvas do Mercado Pago e
+          do e-mail. Só você, como administradora, tem esta função: nenhuma outra conta vê nem
+          usa o backup. Exemplo: se o banco de dados gratuito expirar e apagar tudo, quem baixou
+          o backup antes consegue trazer tudo de volta — todas as contas e os clientes de cada
+          uma; quem nunca baixou, perde os dados.
+        </p>
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-sm leading-relaxed text-[var(--dim)]">
+          <li>
+            <strong className="text-[var(--text)]">Baixe ANTES de o banco de dados expirar.</strong>{" "}
+            Depois que o banco apaga, não há o que recuperar — o botão de restaurar precisa do
+            arquivo guardado com você.
+          </li>
+          <li>
+            <strong className="text-[var(--text)]">O arquivo contém senhas e chaves.</strong>{" "}
+            Guarde com cuidado e nunca compartilhe com ninguém.
+          </li>
+          <li>
+            Restaurar <strong className="text-[var(--text)]">substitui TODOS os dados atuais do
+            gestor</strong> pelos dados do arquivo — todas as contas, não só a sua.
+          </li>
+          <li>
+            O backup <strong className="text-[var(--text)]">NÃO inclui o WhatsApp</strong>: depois
+            de restaurar, é preciso ler um novo QR Code para conectar de novo, e as outras contas
+            precisam entrar de novo com a senha delas (a senha continua a mesma).
+          </li>
+        </ul>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={btnPrimary}
+            disabled={exportBackup.isPending}
+            onClick={() => { setBackupMsg(null); exportBackup.mutate(); }}
+          >
+            {exportBackup.isPending ? "Gerando…" : "Baixar backup"}
+          </button>
+        </div>
+        <div className="mt-4 border-t border-[var(--border)] pt-3">
+          <label className={labelCls} htmlFor="admin-backup-file">Restaurar de um arquivo de backup (.json)</label>
+          <input
+            id="admin-backup-file"
+            ref={backupFileRef}
+            type="file"
+            accept=".json,application/json"
+            className={inputCls}
+            onChange={(e) => { void handleBackupFile(e.target.files?.[0]); }}
+          />
+          {backupFileName && (
+            <p className="mt-1 text-sm text-[var(--dim)]">Arquivo escolhido: {backupFileName}</p>
+          )}
+          {backupSummaryError && (
+            <p className="mt-2 rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm text-[var(--danger)]" role="alert">{backupSummaryError}</p>
+          )}
+          {backupSummary && !backupSummaryError && (
+            <div className="mt-2 rounded-lg bg-[var(--surface2)] p-3 text-sm">
+              <p>
+                Backup da conta <strong>{backupSummary.email}</strong>
+                {backupSummary.exportedAt ? `, feito em ${fmtDate(backupSummary.exportedAt)}` : ""}:
+              </p>
+              <p className="mt-1 text-[var(--dim)]">
+                {Object.entries(backupSummary.counts)
+                  .filter(([, v]) => Number(v) > 0)
+                  .map(([label, v]) => `${v} ${label}`)
+                  .join(" • ") || "Nenhum registro no arquivo."}
+              </p>
+              {backupEmailMismatch ? (
+                <p className="mt-2 font-semibold text-[var(--danger)]" role="alert">
+                  Este backup é de outra administradora. Entre com a conta {backupSummary.email} para restaurar.
+                </p>
+              ) : (
+                <p className="mt-2">
+                  Restaurar vai <strong>substituir TODOS os dados atuais do gestor</strong> pelos
+                  dados deste arquivo — todas as contas, com os clientes de cada uma.
+                </p>
+              )}
+            </div>
+          )}
+          {backupSummary && !backupSummaryError && !backupEmailMismatch && !confirmRestore && (
+            <button
+              type="button"
+              className={`${btnGhost} mt-3`}
+              disabled={importBackup.isPending}
+              onClick={() => setConfirmRestore(true)}
+            >
+              Restaurar backup
+            </button>
+          )}
+          {confirmRestore && backupSummary && (
+            <div className="mt-3 rounded-lg border border-[var(--danger)] p-3 text-sm" role="alert">
+              <p className="font-semibold">
+                Tem certeza? TODOS os dados atuais do gestor serão substituídos pelos do backup de{" "}
+                {backupSummary.exportedAt ? fmtDate(backupSummary.exportedAt) : "data desconhecida"}.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={btnPrimary}
+                  disabled={importBackup.isPending}
+                  onClick={() => { setBackupMsg(null); importBackup.mutate(backupText); }}
+                >
+                  {importBackup.isPending ? "Restaurando…" : "Sim, substituir tudo"}
+                </button>
+                <button type="button" className={btnGhost} disabled={importBackup.isPending} onClick={() => setConfirmRestore(false)}>
+                  Cancelar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+        {backupMsg && (
+          <p className="mt-3 rounded-lg bg-[var(--surface2)] px-3 py-2 text-sm" role="status">{backupMsg}</p>
+        )}
       </div>
     </section>
   );
