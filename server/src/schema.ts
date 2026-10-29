@@ -123,6 +123,10 @@ export const servers = pgTable("servers", {
   browserLocateFound: integer("browser_locate_found").notNull().default(0),
   browserLocateDetail: text("browser_locate_detail").notNull().default(""),
   browserLocateTestedAt: bigint("browser_locate_tested_at", { mode: "number" }),
+  // Diagnóstico da ÚLTIMA localização (JSON em texto): estágio
+  // alcançado, tempos, título/caminho da página, flags de textos
+  // visíveis e trecho sanitizado — sem credencial nenhuma.
+  browserLocateDiagnostic: text("browser_locate_diagnostic").notNull().default(""),
   // Campos do formulário "Novo Servidor" (modelo pedido pela dona do
   // gestor): identificador interno opcional, créditos e custo.
   // creditsBalance é o saldo atual: nasce com initialCredits, sobe nas
