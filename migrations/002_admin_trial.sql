@@ -1,4 +1,4 @@
--- Gestor IPTV (versão externa) — administração, teste grátis e assinatura.
+-- Gestor Flex (versão externa) — administração, teste grátis e assinatura.
 -- Dialeto: Postgres. Idempotente (ADD COLUMN IF NOT EXISTS / CREATE
 -- TABLE IF NOT EXISTS): rodar de novo não apaga dados. Nenhum dado é
 -- apagado por esta migração: o bloqueio de conta vencida é só de

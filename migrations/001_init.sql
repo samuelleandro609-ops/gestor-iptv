@@ -1,4 +1,4 @@
--- Gestor IPTV (versão externa) — criação das tabelas do zero, vazias.
+-- Gestor Flex (versão externa) — criação das tabelas do zero, vazias.
 -- Dialeto: Postgres. Os carimbos de milissegundos (ex.: sessions.expires_at)
 -- são bigint, nunca integer de 32 bits: um valor em ms de 2026 (~1,79 trilhão)
 -- não cabe em integer. As datas de vencimento/criação são timestamp(3)
