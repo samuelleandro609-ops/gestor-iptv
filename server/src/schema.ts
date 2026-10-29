@@ -90,16 +90,18 @@ export const servers = pgTable("servers", {
   // tentada, HTTP e corpo da resposta já sem o token. Nunca guarda o
   // token nem substitui o resultado real do teste.
   apiDiagnostic: text("api_diagnostic").notNull().default(""),
-  // Chamada de extensão (o botão [+] Estender do painel) via API. O
-  // endpoint exato não está na documentação pública acessível, então
-  // caminho, método e corpo são EDITÁVEIS na aba Servidores, pré-
-  // preenchidos com a melhor hipótese. extendVerified só vira 1 quando
-  // uma extensão REAL retorna sucesso — até lá, "extensão pendente".
-  extendPath: text("extend_path").notNull().default("/users/extend"),
-  extendMethod: text("extend_method").notNull().default("POST"),
+  // Chamada de extensão (o botão [+] Estender do painel) via API,
+  // conforme a referência oficial WManage: primeiro GET /lines com
+  // generalSearch para achar o id exato do cliente, depois
+  // PATCH /lines/v2/extend/{id} com {"days": N}. Caminho, método e
+  // corpo continuam EDITÁVEIS na aba Servidores; {id} está
+  // disponível nos modelos. extendVerified só vira 1 quando uma
+  // extensão REAL retorna sucesso — até lá, "extensão pendente".
+  extendPath: text("extend_path").notNull().default("/lines/v2/extend/{id}"),
+  extendMethod: text("extend_method").notNull().default("PATCH"),
   extendBody: text("extend_body")
     .notNull()
-    .default('{"username":"{usuario}","days":{dias},"credits":{creditos}}'),
+    .default('{"days":{dias}}'),
   extendVerified: integer("extend_verified").notNull().default(0),
   extendStatusDetail: text("extend_status_detail").notNull().default(""),
   // Provedor do painel deste servidor: "wplay" (WPlay/WManage, o
