@@ -14,12 +14,6 @@ RUN apt-get update \
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
 
-# Navegador para a automação do botão "Renovar" (Sigma por login, só
-# leitura na etapa atual): instala o Chromium headless + as bibliotecas
-# de sistema. O cache fica dentro da imagem. Se esta etapa falhar, o
-# build falha e o Render mantém a versão anterior no ar — o gestor
-# avisa "navegador de automação não instalado" em vez de cair.
-RUN bun x playwright install --with-deps chromium
 
 COPY . .
 RUN bun run build:client
