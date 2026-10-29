@@ -51,7 +51,12 @@ export async function createDb(): Promise<Db> {
  *  migrations/*.sql, em ordem. Idempotente (CREATE TABLE IF NOT
  *  EXISTS / ADD COLUMN IF NOT EXISTS): rodar de novo não apaga
  *  dados. Não há migração de dados do gestor dentro do Muse — esta
- *  base começa vazia, como uma conta nova. */
+ *  base começa vazia, como uma conta nova.
+ *  Nota interna: as migrations 004/005 só adicionam colunas herdadas
+ *  de uma automação removida do gestor a pedido da dona; o código não
+ *  usa mais essas colunas, mas o esquema e o formato do backup ainda
+ *  as incluem — por isso elas continuam aplicadas (sem efeito em
+ *  bancos que já as têm). */
 export async function migrate(db: Db): Promise<void> {
   for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql"]) {
     const sqlText = readFileSync(

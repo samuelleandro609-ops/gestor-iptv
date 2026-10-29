@@ -103,9 +103,9 @@ export const servers = pgTable("servers", {
   extendVerified: integer("extend_verified").notNull().default(0),
   extendStatusDetail: text("extend_status_detail").notNull().default(""),
   // Provedor do painel deste servidor: "wplay" (WPlay/WManage, o
-  // padrão de todos os servidores antigos) ou "sigma" (Sigma/OneTV,
-  // via integração vinculada). Decide qual API o teste de conexão
-  // e a extensão usam para este servidor.
+  // padrão de todos os servidores). Linhas antigas com outro valor
+  // são ignoradas pelo servidor (nunca contam como conectadas nem
+  // como prontas para extensão) e nenhum dado é apagado.
   panelProvider: text("panel_provider").notNull().default("wplay"),
   // Conexão simples do servidor (link + usuário + senha do painel):
   // ao salvar, o gestor testa o link de verdade e guarda aqui se
@@ -115,17 +115,14 @@ export const servers = pgTable("servers", {
   panelConnected: integer("panel_connected").notNull().default(0),
   panelConnectionDetail: text("panel_connection_detail").notNull().default(""),
   panelConnectionTestedAt: bigint("panel_connection_tested_at", { mode: "number" }),
-  // Resultado da ÚLTIMA localização (só leitura) do botão "Renovar"
-  // do painel Sigma por navegador automatizado (etapa 1: localizar,
-  // sem clicar). browserLocateFound = 1 quando o botão foi
-  // encontrado, visível e habilitado; o motivo fica em linguagem
-  // simples e nunca inclui credencial.
+  // Colunas herdadas de uma automação de navegador removida do
+  // gestor a pedido da dona: sem uso no código atual, mantidas
+  // para não mudar o formato do backup nem o banco já aplicado.
   browserLocateFound: integer("browser_locate_found").notNull().default(0),
   browserLocateDetail: text("browser_locate_detail").notNull().default(""),
   browserLocateTestedAt: bigint("browser_locate_tested_at", { mode: "number" }),
-  // Diagnóstico da ÚLTIMA localização (JSON em texto): estágio
-  // alcançado, tempos, título/caminho da página, flags de textos
-  // visíveis e trecho sanitizado — sem credencial nenhuma.
+  // Diagnóstico herdado da mesma automação removida (JSON em
+  // texto): sem uso no código atual, mantido pelo mesmo motivo.
   browserLocateDiagnostic: text("browser_locate_diagnostic").notNull().default(""),
   // Campos do formulário "Novo Servidor" (modelo pedido pela dona do
   // gestor): identificador interno opcional, créditos e custo.
@@ -178,14 +175,14 @@ export const servers = pgTable("servers", {
     .$defaultFn(() => new Date()),
 });
 
-// Integrações com painéis IPTV (aba Integrações). Dois providers:
-// "wplay" (nome, URL, usuário e senha do painel) e "sigma" (Sigma/
-// OneTV: base da API de revendedor + token Bearer, guardados em
-// apiBase/apiToken — o token nunca é devolvido para a tela). O teste
-// de conexão grava status/detail; Info Painel e Sync IDs gravam o que
-// o painel respondeu de verdade (só WPlay). Um servidor vincula uma
-// integração em servers.panelIntegrationId para testes e renovações
-// automáticas.
+// Integrações com painéis IPTV (aba Integrações): só "wplay"
+// (nome, URL, usuário e senha do painel). O teste de conexão grava
+// status/detail; Info Painel e Sync IDs gravam o que o painel
+// respondeu de verdade. Um servidor vincula uma integração em
+// servers.panelIntegrationId para testes e renovações automáticas.
+// Nota interna: um segundo provedor existiu e foi removido do
+// gestor a pedido da dona; linhas antigas dele são ignoradas e
+// nenhum dado é apagado.
 export const integrations = pgTable("integrations", {
   id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
   ownerId: integer("owner_id").notNull().default(0),
@@ -194,11 +191,9 @@ export const integrations = pgTable("integrations", {
   url: text("url").notNull(),
   panelUser: text("panel_user").notNull(),
   panelPass: text("panel_pass").notNull(),
-  // Sigma: base da API de revendedor (ex.:
-  // https://painel.onetv.plus/api/reseller-api/v1) e token Bearer
-  // criado na página de API de revendedor do painel. O token fica só
-  // no banco e NUNCA é devolvido para a tela — a API expõe apenas se
-  // ele está salvo (hasApiToken).
+  // Campos herdados do provedor removido: sem uso no código
+  // atual, mantidos para não mudar o formato do backup nem o
+  // banco já aplicado. Nada aqui é devolvido para a tela.
   apiBase: text("api_base").notNull().default(""),
   apiToken: text("api_token").notNull().default(""),
   status: text("status")
