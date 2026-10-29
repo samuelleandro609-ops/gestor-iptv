@@ -2606,6 +2606,9 @@ function ClientForm({
           <label htmlFor="c-server" className={labelCls}>Servidor</label>
           <select id="c-server" className={inputCls} value={serverId} onChange={(e) => setServerId(e.target.value)}>
             <option value="">Selecione…</option>
+            {initial?.serverId != null && !data.servers.some((s) => s.id === initial.serverId) && (
+              <option value={initial.serverId} disabled>Servidor removido — escolha outro para trocar</option>
+            )}
             {data.servers.map((s) => (
               <option key={s.id} value={s.id}>{s.name}{s.panelConnected ? " (conectado)" : " (não conectado)"}</option>
             ))}
@@ -3216,7 +3219,10 @@ function ServersTab({ data }: { data: State }) {
     (s) => !q || s.name.toLowerCase().includes(q) || (s.identifier ?? "").toLowerCase().includes(q),
   );
   const totalCredits = data.servers.reduce((sum, s) => sum + s.creditsBalance, 0);
-  const clientsOf = (serverId: number) => data.clients.filter((c) => c.serverId === serverId).length;
+  // Só clientes em uso contam no cartão do servidor: arquivados, na
+  // lixeira e de teste não são "clientes no ar" e inflavam a contagem.
+  const clientsOf = (serverId: number) =>
+    data.clients.filter((c) => c.serverId === serverId && c.listState === "normal" && !c.isTest).length;
   const integrationName = (s: Server) =>
     s.panelIntegrationId != null
       ? (data.integrations.find((i) => i.id === s.panelIntegrationId)?.name ?? "Integração removida")
