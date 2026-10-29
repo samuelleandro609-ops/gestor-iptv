@@ -215,7 +215,7 @@ async function connect(baileys, QRCode, port, version) {
     auth: state,
     logger: silentLogger,
     waWebSocketUrl: "ws://127.0.0.1:" + port + "/ws/chat",
-    browser: ["Gestor IPTV", "Chrome", "1.0"],
+    browser: ["Gestor Flex", "Chrome", "1.0"],
     version,
     connectTimeoutMs: 30000,
     qrTimeout: 60000,

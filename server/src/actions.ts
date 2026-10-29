@@ -1603,7 +1603,7 @@ async function mpCreatePix(
   const payerEmail =
     args.payerEmail && /.+@.+\..+/.test(args.payerEmail)
       ? args.payerEmail
-      : `cliente${args.clientId}@gestor-iptv.com`;
+      : `cliente${args.clientId}@gestor-flex.com`;
   try {
     const res = await fetch("https://api.mercadopago.com/v1/payments", {
       method: "POST",
@@ -1614,7 +1614,7 @@ async function mpCreatePix(
       },
       body: JSON.stringify({
         transaction_amount: args.amountCents / 100,
-        description: args.description ?? `Renovação IPTV — ${args.clientName}`,
+        description: args.description ?? `Renovação Gestor Flex — ${args.clientName}`,
         payment_method_id: "pix",
         external_reference: args.externalReference ?? `gestor-cliente-${args.clientId}`,
         metadata: { gestor_client_id: args.clientId },
@@ -4737,9 +4737,9 @@ export const Actions = {
             apiKey: adminSettings.resendApiKey,
             from: adminSettings.resendFrom,
             to: email,
-            subject: "Bem-vindo ao Gestor IPTV — sua conta foi criada",
-            text: `Sua conta no Gestor IPTV foi criada.\n\nE-mail de acesso: ${email}\nTeste grátis até: ${trialText}\n\nAcesse o gestor em: ${gestorUrl || "o endereço que a administradora informou"}\n\nDepois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.\n\nSe esquecer a senha, use "Esqueci a senha" na tela de login.`,
-            html: `<p>Sua conta no Gestor IPTV foi criada.</p><p><strong>E-mail de acesso:</strong> ${escapeHtml(email)}<br><strong>Teste grátis até:</strong> ${escapeHtml(trialText)}</p><p>Acesse o gestor em: ${gestorUrl ? `<a href="${escapeHtml(gestorUrl)}">${escapeHtml(gestorUrl)}</a>` : "o endereço que a administradora informou"}</p><p>Depois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.</p><p>Se esquecer a senha, use "Esqueci a senha" na tela de login.</p>`,
+            subject: "Bem-vindo ao Gestor Flex — sua conta foi criada",
+            text: `Sua conta no Gestor Flex foi criada.\n\nE-mail de acesso: ${email}\nTeste grátis até: ${trialText}\n\nAcesse o gestor em: ${gestorUrl || "o endereço que a administradora informou"}\n\nDepois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.\n\nSe esquecer a senha, use "Esqueci a senha" na tela de login.`,
+            html: `<p>Sua conta no Gestor Flex foi criada.</p><p><strong>E-mail de acesso:</strong> ${escapeHtml(email)}<br><strong>Teste grátis até:</strong> ${escapeHtml(trialText)}</p><p>Acesse o gestor em: ${gestorUrl ? `<a href="${escapeHtml(gestorUrl)}">${escapeHtml(gestorUrl)}</a>` : "o endereço que a administradora informou"}</p><p>Depois do teste, é só renovar a assinatura para continuar usando — nenhum dado é apagado.</p><p>Se esquecer a senha, use "Esqueci a senha" na tela de login.</p>`,
           });
         }
       } catch {
@@ -5026,9 +5026,9 @@ export const Actions = {
         apiKey: s.resendApiKey,
         from: s.resendFrom,
         to,
-        subject: "Teste de e-mail do Gestor IPTV",
-        text: "Este é um e-mail de teste do Gestor IPTV. Se você recebeu, o envio de e-mails está funcionando.",
-        html: "<p>Este é um e-mail de teste do Gestor IPTV. Se você recebeu, o envio de e-mails está funcionando.</p>",
+        subject: "Teste de e-mail do Gestor Flex",
+        text: "Este é um e-mail de teste do Gestor Flex. Se você recebeu, o envio de e-mails está funcionando.",
+        html: "<p>Este é um e-mail de teste do Gestor Flex. Se você recebeu, o envio de e-mails está funcionando.</p>",
       });
       return result;
     },
@@ -5398,7 +5398,7 @@ export const Actions = {
         clientName: row.email,
         clientId: row.id,
         payerEmail,
-        description: `Assinatura do Gestor IPTV (30 dias) — ${row.email}`,
+        description: `Assinatura Gestor Flex (30 dias) — ${row.email}`,
         externalReference: `gestor-assinatura-${row.id}`,
       });
       if (created.kind === "failed") {
@@ -5526,9 +5526,9 @@ export const Actions = {
               apiKey: adminSettings.resendApiKey,
               from: adminSettings.resendFrom,
               to: account.email,
-              subject: "Redefinir sua senha do Gestor IPTV",
-              text: `Você pediu para redefinir a senha do Gestor IPTV.\n\nAbra este link para criar uma senha nova (vale por 1 hora): ${link}\n\nSe não foi você, ignore este e-mail — sua senha atual continua valendo.`,
-              html: `<p>Você pediu para redefinir a senha do Gestor IPTV.</p><p><a href="${escapeHtml(link)}">Criar uma senha nova</a> (vale por 1 hora).</p><p>Se não foi você, ignore este e-mail — sua senha atual continua valendo.</p>`,
+              subject: "Redefinir sua senha do Gestor Flex",
+              text: `Você pediu para redefinir a senha do Gestor Flex.\n\nAbra este link para criar uma senha nova (vale por 1 hora): ${link}\n\nSe não foi você, ignore este e-mail — sua senha atual continua valendo.`,
+              html: `<p>Você pediu para redefinir a senha do Gestor Flex.</p><p><a href="${escapeHtml(link)}">Criar uma senha nova</a> (vale por 1 hora).</p><p>Se não foi você, ignore este e-mail — sua senha atual continua valendo.</p>`,
             });
           }
         } catch {

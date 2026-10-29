@@ -4,7 +4,7 @@ import { Actions } from "./actions";
 import { createCtx } from "./ctx";
 import { closeDb, createDb, migrate, type Db } from "./db";
 
-// Servidor standalone do Gestor IPTV: serve as páginas compiladas
+// Servidor standalone do Gestor Flex: serve as páginas compiladas
 // (client/dist) e o endpoint POST /actions, com o mesmo protocolo do
 // cliente original — {action, args, actionCallId} -> {data} ou {error}.
 // Sem SDK do Muse, sem login do Muse: a fatura pública abre só com o
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 
-  console.log(`Gestor IPTV (externo) ouvindo na porta ${server.port}`);
+  console.log(`Gestor Flex (externo) ouvindo na porta ${server.port}`);
 }
 
 main().catch((err) => {
