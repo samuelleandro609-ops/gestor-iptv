@@ -333,9 +333,11 @@ function AuthScreen({
     }
   }
 
+  // Tela de login com azul bem mais escuro que o restante do gestor
+  // (só aqui: o fundo global em theme.css não muda).
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[var(--bg)] px-4 py-10 text-[var(--text)]">
-      <SafeAreaTopScrim backgroundColor="var(--bg)" />
+    <div className="flex min-h-screen items-center justify-center bg-[#02070f] px-4 py-10 text-[var(--text)]">
+      <SafeAreaTopScrim backgroundColor="#02070f" />
       <main className="w-full max-w-md">
         <img src={gestorFlexLogo} alt="Gestor Flex" className="mx-auto h-24 w-auto object-contain" />
         <p className="mt-2 text-center text-sm text-[var(--dim)]">
@@ -360,7 +362,7 @@ function AuthScreen({
             Criar conta
           </button>
         </div>
-        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-5" aria-label={mode === "criar" ? "Criar conta" : mode === "esqueci" ? "Esqueci a senha" : "Entrar"}>
+        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-[#132740] bg-[#050e1d] p-5" aria-label={mode === "criar" ? "Criar conta" : mode === "esqueci" ? "Esqueci a senha" : "Entrar"}>
           {notice && !error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
               {notice}
@@ -655,21 +657,23 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
     <div className="relative min-h-screen overflow-hidden">
       {/* Fundo da fatura: imagem de filmes em tela cheia, com leve
           desfoque para o texto continuar legível e os cartazes ainda
-          visíveis por baixo da cor do tema. */}
+          visíveis por baixo da cor do tema. Só no celular (max-sm):
+          desfoque e véu mais fortes e mais respiro, para a imagem
+          parecer mais afastada; no PC o visual não muda. */}
       <div className="absolute inset-0" aria-hidden="true">
         <img
           src={invoiceBg}
           alt=""
-          className="h-full w-full object-cover"
-          style={{ filter: "blur(5px) brightness(0.62)", transform: "scale(1.07)" }}
+          className="h-full w-full object-cover [filter:blur(5px)_brightness(0.62)] max-sm:[filter:blur(14px)_brightness(0.42)]"
+          style={{ transform: "scale(1.07)" }}
         />
         <div
-          className="absolute inset-0"
-          style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)`, opacity: 0.52 }}
+          className="absolute inset-0 opacity-[0.52] max-sm:opacity-[0.8]"
+          style={{ background: `linear-gradient(160deg, ${theme.dark} 0%, ${theme.main} 55%, ${theme.dark} 130%)` }}
         />
       </div>
       <SafeAreaTopScrim backgroundColor={theme.dark} />
-      <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8">
+      <main className="relative mx-auto w-full max-w-md px-4 pb-10 pt-8 max-sm:px-6 max-sm:pt-12">
         <p className="text-center text-sm font-semibold uppercase tracking-widest text-white/80">
           {invoice.serverName ?? "Assinatura Gestor Flex"}
         </p>
@@ -678,7 +682,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
         </h1>
         <p className="mx-auto mt-2 max-w-sm text-center text-sm text-white/85">{invoice.invoiceMessage}</p>
 
-        <section aria-label="Dados da fatura" className="mt-6 rounded-2xl bg-white p-5 text-neutral-900 shadow-xl">
+        <section aria-label="Dados da fatura" className="mt-6 rounded-2xl bg-white p-5 text-neutral-900 shadow-xl max-sm:mt-8 max-sm:p-6">
           <dl className="space-y-3 text-base">
             <div className="flex justify-between gap-4">
               <dt className="text-neutral-500">Cliente</dt>
