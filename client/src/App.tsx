@@ -3635,10 +3635,10 @@ function ServerModal({
   );
   const [autoRenewEnabled, setAutoRenewEnabled] = useState(initial?.autoRenewEnabled ?? true);
   const [sendVia, setSendVia] = useState(initial?.sendVia ?? "padrao");
-  const [extendPath, setExtendPath] = useState(initial?.extendPath ?? "/users/extend");
-  const [extendMethod, setExtendMethod] = useState(initial?.extendMethod ?? "POST");
+  const [extendPath, setExtendPath] = useState(initial?.extendPath ?? "/lines/v2/extend/{id}");
+  const [extendMethod, setExtendMethod] = useState(initial?.extendMethod ?? "PATCH");
   const [extendBody, setExtendBody] = useState(
-    initial?.extendBody ?? '{"username":"{usuario}","days":{dias},"credits":{creditos}}',
+    initial?.extendBody ?? '{"days":{dias}}',
   );
   const [appName, setAppName] = useState(initial?.appName ?? "");
   const [appDownloadUrl, setAppDownloadUrl] = useState(initial?.appDownloadUrl ?? "");
@@ -3896,7 +3896,7 @@ function ServerModal({
                         <div className="mt-2 grid grid-cols-[1fr_130px] gap-3">
                           <div>
                             <label htmlFor="s-extend-path" className={labelCls}>Caminho da extensão</label>
-                            <input id="s-extend-path" className={inputCls} value={extendPath} onChange={(e) => setExtendPath(e.target.value)} placeholder="/users/extend" autoComplete="off" />
+                            <input id="s-extend-path" className={inputCls} value={extendPath} onChange={(e) => setExtendPath(e.target.value)} placeholder="/lines/v2/extend/{id}" autoComplete="off" />
                           </div>
                           <div>
                             <label htmlFor="s-extend-method" className={labelCls}>Método</label>
@@ -3911,7 +3911,7 @@ function ServerModal({
                         <div className="mt-2">
                           <label htmlFor="s-extend-body" className={labelCls}>Corpo da chamada</label>
                           <textarea id="s-extend-body" className={`${inputCls} font-mono text-sm`} rows={3} value={extendBody} onChange={(e) => setExtendBody(e.target.value)} />
-                          <p className="mt-1 text-sm text-[var(--dim)]">Pode usar {"{usuario}"}, {"{senha}"}, {"{dias}"} e {"{creditos}"} — usuário e senha aqui são os do cliente IPTV que será estendido.</p>
+                          <p className="mt-1 text-sm text-[var(--dim)]">Pode usar {"{usuario}"}, {"{senha}"}, {"{dias}"}, {"{creditos}"} e {"{id}"} — usuário e senha aqui são os do cliente IPTV que será estendido, e {"{id}"} é o código dele no painel, achado pela busca antes de estender.</p>
                         </div>
                       </div>
                     </div>
