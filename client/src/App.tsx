@@ -597,6 +597,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
   // imagem de fundo aparecer sem tingimento verde.
   const theme = { main: "#111827", dark: "#0b0f17", soft: "#f3f4f6" };
   const [pix, setPix] = useState<string | null>(null);
+  const [qr, setQr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
   const [payment, setPayment] = useState<Payment | null>(null);
@@ -614,6 +615,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
     onSuccess: (p) => {
       setPayment(p);
       if (p.pixCode) setPix(p.pixCode);
+      setQr(p.qrDataUrl ?? null);
       setStatusMsg(p.detail || null);
       queryClient.invalidateQueries({ queryKey: ["state"] });
     },
@@ -817,6 +819,15 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
               )}
               {pix ? (
                 <>
+                  {qr && (
+                    <div className="mb-4 flex justify-center">
+                      <img
+                        src={qr}
+                        alt="QR Code do Pix desta fatura — aponte a câmera do aplicativo do seu banco"
+                        className="h-56 w-56 rounded-xl bg-white p-2"
+                      />
+                    </div>
+                  )}
                   <label htmlFor="pix-key" className="text-sm font-medium text-neutral-500">
                     Pix copia e cola do Mercado Pago
                   </label>
@@ -835,6 +846,11 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
                   >
                     {copied ? "Chave copiada ✓" : "Copiar chave Pix"}
                   </button>
+                  {!qr && (
+                    <p className="mt-2 text-center text-xs text-neutral-500">
+                      O QR Code não foi gerado, mas a chave Pix acima funciona normalmente.
+                    </p>
+                  )}
                 </>
               ) : (
                 <div className="rounded-xl bg-red-50 p-4 text-sm text-red-900">
@@ -844,6 +860,8 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
                     type="button"
                     onClick={() => {
                       setPayment(null);
+                      setPix(null);
+                      setQr(null);
                       setStatusMsg(null);
                     }}
                     className="mt-3 w-full rounded-lg bg-white py-2.5 font-semibold text-neutral-900"
