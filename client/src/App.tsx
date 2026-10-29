@@ -3496,7 +3496,15 @@ function ServersTab({ data }: { data: State }) {
                     Teste de extensão real ([+] Estender) — {s.extendVerified ? "verificado" : "pendente"}
                   </p>
                   <p className="mt-1 text-sm text-[var(--dim)]">
-                    Chamada: <span className="font-mono text-xs">{s.extendMethod} {s.extendPath}</span>. O teste renova de verdade e consome os créditos do plano do cliente escolhido.
+                    {s.panelProvider === "topsul" ? (
+                      <>
+                        Chamada: <span className="font-mono text-xs">POST /topsul/renew_client</span> (API TopSul, com o token e o segredo da integração vinculada). O teste renova de verdade e consome os créditos do plano do cliente escolhido.
+                      </>
+                    ) : (
+                      <>
+                        Chamada: <span className="font-mono text-xs">{s.extendMethod} {s.extendPath}</span>. O teste renova de verdade e consome os créditos do plano do cliente escolhido.
+                      </>
+                    )}
                     {s.extendStatusDetail ? ` ${s.extendStatusDetail}` : ""}
                   </p>
                   <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto]">
@@ -6470,14 +6478,22 @@ function IntegrationsTab({ data }: { data: State }) {
 
 /* ---------------- Integrações com painéis ---------------- */
 
+// Base padrão da API TopSul, preenchida no formulário quando a
+// integração é TopSul e a base vem vazia. Editável na tela.
+const DEFAULT_TOPSUL_API_BASE = "https://vmi2606883.contaboserver.net";
+
 function PanelsIntegration({ data }: { data: State }) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [editing, setEditing] = useState<Integration | null | undefined>(undefined);
+  const [provider, setProvider] = useState<"wplay" | "topsul">("wplay");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [panelUser, setPanelUser] = useState("");
   const [panelPass, setPanelPass] = useState("");
+  const [apiBase, setApiBase] = useState("");
+  const [apiToken, setApiToken] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [msgs, setMsgs] = useState<Record<number, string>>({});
   const [linkFor, setLinkFor] = useState<number | null>(null);
@@ -6488,15 +6504,20 @@ function PanelsIntegration({ data }: { data: State }) {
     mutationFn: () =>
       api.saveIntegration({
         id: editing?.id,
-        provider: "wplay",
+        provider,
         name: name.trim(),
         url: url.trim(),
         panelUser: panelUser.trim(),
         panelPass,
+        apiBase: provider === "topsul" ? apiBase.trim() || DEFAULT_TOPSUL_API_BASE : undefined,
+        apiToken: provider === "topsul" ? apiToken : undefined,
+        apiSecret: provider === "topsul" ? apiSecret : undefined,
       }),
     onSuccess: () => {
       setEditing(undefined);
       setPanelPass("");
+      setApiToken("");
+      setApiSecret("");
       setFormError(null);
       invalidate();
     },
@@ -6542,18 +6563,26 @@ function PanelsIntegration({ data }: { data: State }) {
 
   function openNew() {
     setEditing(null);
+    setProvider("wplay");
     setName("");
     setUrl("");
     setPanelUser("");
     setPanelPass("");
+    setApiBase("");
+    setApiToken("");
+    setApiSecret("");
     setFormError(null);
   }
   function openEdit(i: Integration) {
     setEditing(i);
+    setProvider(i.provider === "topsul" ? "topsul" : "wplay");
     setName(i.name);
     setUrl(i.url);
     setPanelUser(i.panelUser);
     setPanelPass("");
+    setApiBase(i.provider === "topsul" ? i.apiBase || DEFAULT_TOPSUL_API_BASE : "");
+    setApiToken("");
+    setApiSecret("");
     setFormError(null);
   }
 
@@ -6597,7 +6626,7 @@ function PanelsIntegration({ data }: { data: State }) {
       {editing !== undefined && (
         <form
           className="space-y-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4"
-          aria-label={editing ? "Editar integração WPlay" : "Nova integração WPlay"}
+          aria-label={editing ? `Editar integração ${provider === "topsul" ? "TopSul" : "WPlay"}` : `Nova integração ${provider === "topsul" ? "TopSul" : "WPlay"}`}
           onSubmit={(e) => {
             e.preventDefault();
             setFormError(null);
@@ -6605,10 +6634,36 @@ function PanelsIntegration({ data }: { data: State }) {
               setFormError("Preencha nome, URL do servidor, usuário e senha do painel.");
               return;
             }
+            if (provider === "topsul" && !editing && (!apiToken.trim() || !apiSecret.trim())) {
+              setFormError("Preencha o token e o segredo da API TopSul.");
+              return;
+            }
             save.mutate();
           }}
         >
-          <h3 className="font-display text-lg font-bold">{editing ? "Editar integração — WPlay" : "Nova integração — WPlay"}</h3>
+          <h3 className="font-display text-lg font-bold">{editing ? `Editar integração — ${provider === "topsul" ? "TopSul" : "WPlay"}` : `Nova integração — ${provider === "topsul" ? "TopSul" : "WPlay"}`}</h3>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="Provedor do painel">
+            {(["wplay", "topsul"] as const).map((p) => (
+              <button
+                key={p}
+                type="button"
+                aria-pressed={provider === p}
+                disabled={!!editing}
+                title={editing ? "O provedor é fixo desde a criação." : undefined}
+                onClick={() => {
+                  setProvider(p);
+                  if (p === "topsul" && !apiBase.trim()) setApiBase(DEFAULT_TOPSUL_API_BASE);
+                }}
+                className={
+                  provider === p
+                    ? "rounded-full bg-[var(--accent)] px-4 py-2 font-semibold text-[var(--accent-ink)] disabled:opacity-70"
+                    : "rounded-full border border-[var(--border)] bg-[var(--surface)] px-4 py-2 font-medium disabled:opacity-50"
+                }
+              >
+                {p === "wplay" ? "WPlay" : "TopSul"}
+              </button>
+            ))}
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div>
               <label htmlFor="int-name" className={labelCls}>Nome da integração *</label>
@@ -6637,6 +6692,44 @@ function PanelsIntegration({ data }: { data: State }) {
               />
               <p className="mt-1 text-sm text-[var(--dim)]">A senha fica salva no gestor e nunca volta para a tela.</p>
             </div>
+            {provider === "topsul" && (
+              <>
+                <div>
+                  <label htmlFor="int-apibase" className={labelCls}>Base da API TopSul *</label>
+                  <input id="int-apibase" className={inputCls} value={apiBase} onChange={(e) => setApiBase(e.target.value)} placeholder={DEFAULT_TOPSUL_API_BASE} autoComplete="off" required />
+                  <p className="mt-1 text-sm text-[var(--dim)]">Endereço da API TopSul, sem /topsul no final. Já vem preenchido com o padrão.</p>
+                </div>
+                <div>
+                  <label htmlFor="int-apitoken" className={labelCls}>
+                    {editing ? "Token da API TopSul (em branco mantém o salvo)" : "Token da API TopSul *"}
+                  </label>
+                  <input
+                    id="int-apitoken"
+                    type="password"
+                    className={inputCls}
+                    value={apiToken}
+                    onChange={(e) => setApiToken(e.target.value)}
+                    placeholder={editing ? "•••••• salvo no gestor — nunca exibido" : ""}
+                    autoComplete="off"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="int-apisecret" className={labelCls}>
+                    {editing ? "Segredo da API TopSul (em branco mantém o salvo)" : "Segredo da API TopSul *"}
+                  </label>
+                  <input
+                    id="int-apisecret"
+                    type="password"
+                    className={inputCls}
+                    value={apiSecret}
+                    onChange={(e) => setApiSecret(e.target.value)}
+                    placeholder={editing ? "•••••• salvo no gestor — nunca exibido" : ""}
+                    autoComplete="off"
+                  />
+                  <p className="mt-1 text-sm text-[var(--dim)]">O token e o segredo ficam salvos no gestor e nunca voltam para a tela. Nunca cole nenhum dos dois no chat.</p>
+                </div>
+              </>
+            )}
           </div>
           {formError && <p className="text-sm font-medium text-[var(--danger)]" role="alert">{formError}</p>}
           <div className="flex flex-wrap gap-2">
@@ -6674,7 +6767,12 @@ function PanelsIntegration({ data }: { data: State }) {
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <p className="font-display text-lg font-bold">{i.name}</p>
-                    <p className="text-sm text-[var(--dim)]">WPlay • usuário: {i.panelUser} • senha: {i.hasPass ? "salva (nunca exibida)" : "não salva"}</p>
+                    <p className="text-sm text-[var(--dim)]">{i.provider === "topsul" ? "TopSul" : "WPlay"} • usuário: {i.panelUser} • senha: {i.hasPass ? "salva (nunca exibida)" : "não salva"}</p>
+                    {i.provider === "topsul" && (
+                      <p className="text-sm text-[var(--dim)]">
+                        Base da API: {i.apiBase || DEFAULT_TOPSUL_API_BASE} • token: {i.hasApiToken ? "salvo (nunca exibido)" : "não salvo"} • segredo: {i.hasApiSecret ? "salvo (nunca exibido)" : "não salvo"}
+                      </p>
+                    )}
                   </div>
                   {statusBadge(i)}
                 </div>
@@ -6723,12 +6821,16 @@ function PanelsIntegration({ data }: { data: State }) {
                 )}
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button type="button" className={btnGhost} disabled={info.isPending} onClick={() => info.mutate(i.id)} aria-label={`Ver informações do painel da integração ${i.name}`}>
-                    Info Painel
-                  </button>
-                  <button type="button" className={btnGhost} disabled={syncIds.isPending} onClick={() => syncIds.mutate(i.id)} aria-label={`Sincronizar IDs da integração ${i.name}`}>
-                    Sync IDs
-                  </button>
+                  {i.provider !== "topsul" && (
+                    <>
+                      <button type="button" className={btnGhost} disabled={info.isPending} onClick={() => info.mutate(i.id)} aria-label={`Ver informações do painel da integração ${i.name}`}>
+                        Info Painel
+                      </button>
+                      <button type="button" className={btnGhost} disabled={syncIds.isPending} onClick={() => syncIds.mutate(i.id)} aria-label={`Sincronizar IDs da integração ${i.name}`}>
+                        Sync IDs
+                      </button>
+                    </>
+                  )}
                   <button
                     type="button"
                     className={btnGhost}
