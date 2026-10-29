@@ -115,6 +115,14 @@ export const servers = pgTable("servers", {
   panelConnected: integer("panel_connected").notNull().default(0),
   panelConnectionDetail: text("panel_connection_detail").notNull().default(""),
   panelConnectionTestedAt: bigint("panel_connection_tested_at", { mode: "number" }),
+  // Resultado da ÚLTIMA localização (só leitura) do botão "Renovar"
+  // do painel Sigma por navegador automatizado (etapa 1: localizar,
+  // sem clicar). browserLocateFound = 1 quando o botão foi
+  // encontrado, visível e habilitado; o motivo fica em linguagem
+  // simples e nunca inclui credencial.
+  browserLocateFound: integer("browser_locate_found").notNull().default(0),
+  browserLocateDetail: text("browser_locate_detail").notNull().default(""),
+  browserLocateTestedAt: bigint("browser_locate_tested_at", { mode: "number" }),
   // Campos do formulário "Novo Servidor" (modelo pedido pela dona do
   // gestor): identificador interno opcional, créditos e custo.
   // creditsBalance é o saldo atual: nasce com initialCredits, sobe nas
