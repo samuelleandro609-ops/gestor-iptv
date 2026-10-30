@@ -3638,7 +3638,7 @@ function ServerModal({
   const [extendPath, setExtendPath] = useState(initial?.extendPath ?? "/lines/v2/extend/{id}");
   const [extendMethod, setExtendMethod] = useState(initial?.extendMethod ?? "PATCH");
   const [extendBody, setExtendBody] = useState(
-    initial?.extendBody ?? '{"days":{dias}}',
+    initial?.extendBody ?? '{"months":{meses}}',
   );
   const [appName, setAppName] = useState(initial?.appName ?? "");
   const [appDownloadUrl, setAppDownloadUrl] = useState(initial?.appDownloadUrl ?? "");
@@ -3911,7 +3911,7 @@ function ServerModal({
                         <div className="mt-2">
                           <label htmlFor="s-extend-body" className={labelCls}>Corpo da chamada</label>
                           <textarea id="s-extend-body" className={`${inputCls} font-mono text-sm`} rows={3} value={extendBody} onChange={(e) => setExtendBody(e.target.value)} />
-                          <p className="mt-1 text-sm text-[var(--dim)]">Pode usar {"{usuario}"}, {"{senha}"}, {"{dias}"}, {"{creditos}"} e {"{id}"} — usuário e senha aqui são os do cliente IPTV que será estendido, e {"{id}"} é o código dele no painel, achado pela busca antes de estender.</p>
+                          <p className="mt-1 text-sm text-[var(--dim)]">Pode usar {"{usuario}"}, {"{senha}"}, {"{dias}"}, {"{creditos}"}, {"{meses}"} e {"{id}"} — usuário e senha aqui são os do cliente IPTV que será estendido, {"{id}"} é o código dele no painel, achado pela busca antes de estender, e {"{meses}"} é a duração em meses (30 dias = 1 mês; só 15 dias vai em dias).</p>
                         </div>
                       </div>
                     </div>
