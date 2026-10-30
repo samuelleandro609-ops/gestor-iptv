@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS servers (
   api_diagnostic text NOT NULL DEFAULT '',
   extend_path text NOT NULL DEFAULT '/lines/v2/extend/{id}',
   extend_method text NOT NULL DEFAULT 'PATCH',
-  extend_body text NOT NULL DEFAULT '{"days":{dias}}',
+  extend_body text NOT NULL DEFAULT '{"months":{meses}}',
   extend_verified integer NOT NULL DEFAULT 0,
   extend_status_detail text NOT NULL DEFAULT '',
   panel_connected integer NOT NULL DEFAULT 0,
