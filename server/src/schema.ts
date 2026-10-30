@@ -93,15 +93,16 @@ export const servers = pgTable("servers", {
   // Chamada de extensão (o botão [+] Estender do painel) via API,
   // conforme a referência oficial WManage: primeiro GET /lines com
   // generalSearch para achar o id exato do cliente, depois
-  // PATCH /lines/v2/extend/{id} com {"days": N}. Caminho, método e
-  // corpo continuam EDITÁVEIS na aba Servidores; {id} está
-  // disponível nos modelos. extendVerified só vira 1 quando uma
+  // PATCH /lines/v2/extend/{id} com {"months": N} (planos de
+  // 30/60/90 dias; só 15 dias usa {"days": 15}). Caminho, método e
+  // corpo continuam EDITÁVEIS na aba Servidores; {id} e {meses} estão
+  // disponíveis nos modelos. extendVerified só vira 1 quando uma
   // extensão REAL retorna sucesso — até lá, "extensão pendente".
   extendPath: text("extend_path").notNull().default("/lines/v2/extend/{id}"),
   extendMethod: text("extend_method").notNull().default("PATCH"),
   extendBody: text("extend_body")
     .notNull()
-    .default('{"days":{dias}}'),
+    .default('{"months":{meses}}'),
   extendVerified: integer("extend_verified").notNull().default(0),
   extendStatusDetail: text("extend_status_detail").notNull().default(""),
   // Provedor do painel deste servidor: "wplay" (WPlay/WManage, o
