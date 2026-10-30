@@ -1,4 +1,4 @@
-import { bigint, index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, doublePrecision, index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // Contas de acesso ao gestor: o gestor é usado por várias pessoas e
@@ -28,6 +28,11 @@ export const accounts = pgTable("accounts", {
   subPriceCents: integer("sub_price_cents").notNull().default(0),
   subStatus: text("sub_status").notNull().default("trial"),
   lastLoginAt: timestamp("last_login_at", { mode: "date", precision: 3 }),
+  // Indicação de contas: código próprio de 8 caracteres (único quando
+  // preenchido) e a conta que indicou esta conta (null = chegou sem
+  // link). Nada aqui é senha nem credencial.
+  referralCode: text("referral_code"),
+  referredByAccountId: integer("referred_by_account_id"),
 });
 
 // Tokens de redefinição de senha: guarda só o HASH do token (sha256),
@@ -136,7 +141,11 @@ export const servers = pgTable("servers", {
   // multiplica o custo (e o consumo) pelo número de telas do cliente.
   identifier: text("identifier").notNull().default(""),
   initialCredits: integer("initial_credits").notNull().default(0),
-  creditsBalance: integer("credits_balance").notNull().default(0),
+  // Saldo de créditos acompanhado LOCALMENTE (a API do painel não
+  // informa o saldo do revendedor): decimal para guardar frações
+  // (ex.: 4,53, ou 0,5 de um plano de 15 dias).
+  creditsBalance: doublePrecision("credits_balance").notNull().default(0),
+  creditsBalanceUpdatedAt: timestamp("credits_balance_updated_at", { mode: "date", precision: 3 }),
   costPerCreditCents: integer("cost_per_credit_cents").notNull().default(0),
   chargeByScreens: integer("charge_by_screens").notNull().default(0),
   notes: text("notes").notNull().default(""),
@@ -225,8 +234,8 @@ export const serverCreditLogs = pgTable("server_credit_logs", {
   id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
   ownerId: integer("owner_id").notNull().default(0),
   serverId: integer("server_id").notNull(),
-  delta: integer("delta").notNull(),
-  balanceAfter: integer("balance_after").notNull(),
+  delta: doublePrecision("delta").notNull(),
+  balanceAfter: doublePrecision("balance_after").notNull(),
   note: text("note").notNull().default(""),
   createdAt: timestamp("created_at", { mode: "date", precision: 3 })
     .notNull()
@@ -466,7 +475,34 @@ export const settings = pgTable("settings", {
   resendApiKey: text("resend_api_key").notNull().default(""),
   resendFrom: text("resend_from").notNull().default(""),
   defaultSubPriceCents: integer("default_sub_price_cents").notNull().default(0),
+  // Dias de assinatura concedidos à conta que indicou outra conta
+  // quando a indicada paga a primeira assinatura. 0 = recompensas
+  // desligadas. Só a administradora edita (nas configurações dela).
+  referralRewardDays: integer("referral_reward_days").notNull().default(30),
 });
+
+// Recompensas de indicação de contas: uma linha por conta indicada
+// que pagou a assinatura (uma só, para sempre) e por cobrança que a
+// gerou — os índices únicos impedem conceder duas vezes. Não entra
+// em conflito com a aba "Indicação de Clientes" (clients.referredBy),
+// que é outro mecanismo e não é tocado aqui.
+export const referralRewards = pgTable(
+  "referral_rewards",
+  {
+    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+    referrerAccountId: integer("referrer_account_id").notNull(),
+    referredAccountId: integer("referred_account_id").notNull(),
+    subscriptionPaymentId: integer("subscription_payment_id").notNull(),
+    daysGranted: integer("days_granted").notNull(),
+    grantedAt: timestamp("granted_at", { mode: "date", precision: 3 })
+      .notNull()
+      .$defaultFn(() => new Date()),
+  },
+  (t) => [
+    uniqueIndex("referral_rewards_referred_uidx").on(t.referredAccountId),
+    uniqueIndex("referral_rewards_payment_uidx").on(t.subscriptionPaymentId),
+  ],
+);
 
 // Registro dos avisos automáticos de vencimento (scheduler 07h-09h):
 // uma linha por conta + cliente + tipo + dia (data de São Paulo).
