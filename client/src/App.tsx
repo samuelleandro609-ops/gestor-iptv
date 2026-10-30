@@ -353,18 +353,46 @@ function AuthScreen({
     }
   }
 
-  // Tela de login com azul bem mais escuro que o restante do gestor
-  // (só aqui: o fundo global em theme.css não muda).
+  // Tela de login imersiva: ocupa a tela inteira do celular (100dvh),
+  // com fundo animado em azul-marinho (orbes de luz, grade sutil e
+  // cartões flutuantes do fluxo de automação) e o formulário num
+  // cartão de vidro legível. Só o visual muda: campos, validação,
+  // mensagens e ações continuam exatamente os mesmos.
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#02070f] px-4 py-10 text-[var(--text)]">
+    <div className="auth-scene relative flex min-h-dvh items-center justify-center overflow-hidden px-4 py-10 text-[var(--text)]">
       <SafeAreaTopScrim backgroundColor="#02070f" />
-      <main className="w-full max-w-md">
-        <img src={gestorFlexLogo} alt="Gestor Flex" className="mx-auto h-24 w-auto object-contain" />
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+        <div className="auth-grid absolute inset-0" />
+        <div className="auth-blob left-[-10%] top-[-8%] h-72 w-72 bg-[#14b3d0]/40" />
+        <div className="auth-blob auth-blob-rev right-[-12%] top-[38%] h-80 w-80 bg-[#1d9fe0]/30" />
+        <div className="auth-blob bottom-[-14%] left-[22%] h-72 w-72 bg-[#34d399]/25" style={{ animationDelay: "-8s" }} />
+        <div className="absolute left-3 top-[8%] opacity-80 max-sm:opacity-60 sm:left-[6%]">
+          <span className="auth-chip"><span className="h-2 w-2 shrink-0 rounded-full bg-emerald-400" />Pix aprovado · conta renovada</span>
+        </div>
+        <div className="absolute right-3 top-[24%] opacity-80 max-sm:opacity-60 sm:right-[6%]">
+          <span className="auth-chip auth-chip-late"><span className="h-2 w-2 shrink-0 rounded-full bg-[#2ecbe8]" />Aviso enviado no WhatsApp</span>
+        </div>
+        <div className="absolute bottom-[9%] left-3 opacity-80 max-sm:opacity-60 sm:left-[7%]">
+          <span className="auth-chip auth-chip-late"><span className="h-2 w-2 shrink-0 rounded-full bg-amber-400" />Fatura com QR Code gerada</span>
+        </div>
+        <div className="absolute bottom-[22%] right-3 opacity-80 max-sm:opacity-60 sm:right-[7%]">
+          <span className="auth-chip"><span className="h-2 w-2 shrink-0 rounded-full bg-violet-400" />Cliente novo cadastrado</span>
+        </div>
+      </div>
+      <main className="relative z-10 w-full max-w-md">
+        <img src={gestorFlexLogo} alt="Gestor Flex" className="mx-auto h-28 w-auto object-contain drop-shadow-[0_10px_30px_rgba(20,179,208,0.35)] sm:h-32" />
         <p className="mt-2 text-center text-sm text-[var(--dim)]">
           Cada conta tem os seus próprios clientes, servidores, planos e WhatsApp.
           Conta nova começa do zero, vazia.
         </p>
-        <div className="mt-6 grid grid-cols-2 gap-2" role="group" aria-label="Entrar ou criar conta">
+        <div aria-hidden="true" className="mx-auto mt-5 flex max-w-sm items-center justify-center gap-2 text-[11px] font-semibold text-[#9fb4cc]">
+          <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">Pix aprovado</span>
+          <span className="auth-flow-line w-6 shrink-0" />
+          <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">Conta renovada</span>
+          <span className="auth-flow-line w-6 shrink-0" />
+          <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">Aviso no WhatsApp</span>
+        </div>
+        <div className="mt-6 grid grid-cols-2 gap-2 rounded-xl border border-white/10 bg-white/[0.03] p-1" role="group" aria-label="Entrar ou criar conta">
           <button
             type="button"
             aria-pressed={mode === "entrar"}
@@ -382,7 +410,7 @@ function AuthScreen({
             Criar conta
           </button>
         </div>
-        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-[#132740] bg-[#050e1d] p-5" aria-label={mode === "criar" ? "Criar conta" : mode === "esqueci" ? "Esqueci a senha" : "Entrar"}>
+        <form onSubmit={submit} className="mt-4 space-y-3 rounded-2xl border border-white/10 bg-[#050e1d]/80 p-5 shadow-2xl backdrop-blur-xl" aria-label={mode === "criar" ? "Criar conta" : mode === "esqueci" ? "Esqueci a senha" : "Entrar"}>
           {notice && !error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
               {notice}
@@ -1258,7 +1286,10 @@ function Manager({
     return <BlockedScreen data={data} onLogout={onLogout} />;
   }
 
+  // Selo de vencimentos na lateral: só clientes em uso (lista normal,
+  // não-teste) — arquivados, lixeira e teste não inflam o número.
   const expiringSoon = data.clients.filter((c) => {
+    if (c.listState !== "normal" || c.isTest) return false;
     const left = daysLeft(c.expiresAt);
     return data.warnDays.some((d) => left === d) || left < 0;
   });
@@ -1774,15 +1805,19 @@ function ClientsTab({
   const archivedCount = data.clients.filter((c) => c.listState === "arquivado").length;
   const trashCount = data.clients.filter((c) => c.listState === "lixeira").length;
 
-  const totalValue = normalClients.reduce((s, c) => s + c.effectivePriceCents, 0);
-  const activeClients = normalClients.filter((c) => c.status === "ativo" && daysLeft(c.expiresAt) >= 0);
-  const expiredClients = normalClients.filter((c) => daysLeft(c.expiresAt) < 0);
+  // Cartões da aba Clientes usam a MESMA definição do Dashboard:
+  // só clientes em uso (lista normal, não-teste). Teste tem a aba
+  // própria e nunca entra nestes cartões.
+  const inUseClients = normalClients.filter((c) => !c.isTest);
+  const totalValue = inUseClients.reduce((s, c) => s + c.effectivePriceCents, 0);
+  const activeClients = inUseClients.filter((c) => c.status === "ativo" && daysLeft(c.expiresAt) >= 0);
+  const expiredClients = inUseClients.filter((c) => daysLeft(c.expiresAt) < 0);
   const activeValue = activeClients.reduce((s, c) => s + c.effectivePriceCents, 0);
   const expiredValue = expiredClients.reduce((s, c) => s + c.effectivePriceCents, 0);
-  const pausedCount = normalClients.filter((c) => c.status === "pausado").length;
+  const pausedCount = inUseClients.filter((c) => c.status === "pausado").length;
 
   const statCards = [
-    { label: "Total", count: normalClients.length, value: totalValue, hint: pausedCount > 0 ? `${pausedCount} pausado${pausedCount > 1 ? "s" : ""}` : "clientes na lista", color: "var(--card-blue)", bg: "var(--card-blue-bg)" },
+    { label: "Total", count: inUseClients.length, value: totalValue, hint: pausedCount > 0 ? `${pausedCount} pausado${pausedCount > 1 ? "s" : ""}` : "clientes na lista", color: "var(--card-blue)", bg: "var(--card-blue-bg)" },
     { label: "Ativos", count: activeClients.length, value: activeValue, hint: "assinaturas dentro do prazo", color: "var(--card-green)", bg: "var(--card-green-bg)" },
     { label: "Vencidos", count: expiredClients.length, value: expiredValue, hint: "precisam de renovação", color: "var(--card-red)", bg: "var(--card-red-bg)" },
   ];
@@ -5467,8 +5502,14 @@ function DashboardTab({
   const [query, setQuery] = useState("");
   const money = (cents: number) => (hideValues ? "R$ •••" : brl(cents));
 
-  const regular = data.clients.filter((c) => !c.isTest);
-  const testCount = data.clients.length - regular.length;
+  // Conjunto "em uso": só contam no Dashboard os clientes da lista
+  // normal que NÃO são de teste — exatamente a mesma definição do
+  // cartão de cada servidor (clientsOf) e da aba Clientes. Arquivados
+  // e lixeira saem de TODAS as contagens e somas asssim que saem da
+  // lista normal, e voltam quando restaurados. Teste tem contagem
+  // própria, separada, e nunca entra em Ativos/Total.
+  const regular = data.clients.filter((c) => c.listState === "normal" && !c.isTest);
+  const testCount = data.clients.filter((c) => c.listState === "normal" && c.isTest).length;
   const ativos = regular.filter((c) => c.status === "ativo" && daysLeft(c.expiresAt) >= 0);
   const vencidos = regular.filter((c) => daysLeft(c.expiresAt) < 0);
   const sumPrices = (list: Client[]) => list.reduce((s, c) => s + c.effectivePriceCents, 0);
@@ -5482,11 +5523,12 @@ function DashboardTab({
   const q = query.trim().toLowerCase();
   const results = q
     ? data.clients
+        .filter((c) => c.listState === "normal")
         .filter((c) => c.name.toLowerCase().includes(q) || c.iptvUser.toLowerCase().includes(q))
         .slice(0, 6)
     : [];
 
-  const byExpiry = [...data.clients].sort((a, b) => a.expiresAt.localeCompare(b.expiresAt));
+  const byExpiry = [...regular].sort((a, b) => a.expiresAt.localeCompare(b.expiresAt));
   const dueGroups: { title: string; items: Client[] }[] = [
     { title: "Vencidos", items: byExpiry.filter((c) => daysLeft(c.expiresAt) < 0) },
     { title: "Vence Hoje", items: byExpiry.filter((c) => daysLeft(c.expiresAt) === 0) },
@@ -5863,7 +5905,7 @@ function TestsTab({
   const [msg, setMsg] = useState<string | null>(null);
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["state"] });
 
-  const testClients = data.clients.filter((c) => c.isTest);
+  const testClients = data.clients.filter((c) => c.isTest && c.listState === "normal");
   const validationPayments = data.payments.filter((p) => p.mode === "validacao");
 
   const create = useMutation({
