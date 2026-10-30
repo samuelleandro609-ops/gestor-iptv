@@ -30,6 +30,12 @@ function brl(cents: number): string {
   return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+// Saldo de créditos com 2 casas decimais (pt-BR): o saldo é decimal
+// (ex.: 4,53) e o valor inteiro escondia as frações.
+function fmtCredits(n: number): string {
+  return n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function parseBRL(text: string): number | null {
   const clean = text.replace(/[^\d,.-]/g, "").replace(/\./g, "").replace(",", ".");
   const n = Number(clean);
@@ -317,6 +323,16 @@ function friendlyAuthError(err: unknown): string {
   return raw;
 }
 
+// Código de indicação vindo do link de cadastro: "#/cadastro?ref=XXXX"
+// (hash) ou "?ref=XXXX" (query). Só o formato é conferido aqui — um
+// código desconhecido é ignorado em silêncio pelo servidor, sem erro.
+function parseReferralCodeFromUrl(): string | null {
+  const hashMatch = window.location.hash.match(/ref=([A-Za-z0-9]{4,20})/);
+  if (hashMatch) return hashMatch[1]!;
+  const searchMatch = window.location.search.match(/ref=([A-Za-z0-9]{4,20})/);
+  return searchMatch ? searchMatch[1]! : null;
+}
+
 function AuthScreen({
   onLoggedIn,
   notice,
@@ -324,7 +340,10 @@ function AuthScreen({
   onLoggedIn: (token: string) => void;
   notice?: string | null;
 }) {
-  const [mode, setMode] = useState<"entrar" | "criar" | "esqueci">("entrar");
+  const [referralCode] = useState<string | null>(() => parseReferralCodeFromUrl());
+  const [mode, setMode] = useState<"entrar" | "criar" | "esqueci">(() =>
+    referralCode ? "criar" : "entrar",
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -343,7 +362,11 @@ function AuthScreen({
       }
       const result =
         mode === "criar"
-          ? await api.register({ email: email.trim(), password })
+          ? await api.register({
+              email: email.trim(),
+              password,
+              ...(referralCode ? { referralCode } : {}),
+            })
           : await api.login({ email: email.trim(), password });
       onLoggedIn(result.token);
     } catch (err) {
@@ -468,6 +491,11 @@ function AuthScreen({
                 Esqueci a senha
               </button>
             </div>
+          )}
+          {mode === "criar" && referralCode && (
+            <p className="rounded-lg bg-[var(--ok-bg)] px-3 py-2 text-sm font-medium text-[var(--card-green)]">
+              Você chegou por um link de indicação.
+            </p>
           )}
           {error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
@@ -997,6 +1025,7 @@ type Tab =
   | "whatsapp"
   | "planos"
   | "cupons"
+  | "indique"
   | "indicacao"
   | "suporte"
   | "administracao";
@@ -1082,6 +1111,14 @@ function MenuIcon({ tab }: { tab: Tab }) {
         <svg {...common}>
           <path d="M4 8.5V6a1.5 1.5 0 0 1 1.5-1.5h13A1.5 1.5 0 0 1 20 6v2.5a2.75 2.75 0 0 0 0 5.5v2.5a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 16.5V14a2.75 2.75 0 0 0 0-5.5z" />
           <path d="M13.5 7v2M13.5 11v2M13.5 15v2" />
+        </svg>
+      );
+    case "indique":
+      return (
+        <svg {...common}>
+          <rect x="3" y="8" width="18" height="13" rx="2" />
+          <path d="M12 8v13M12 8s-4.5.3-4.5-2.5S12 3 12 8zM12 8s4.5.3 4.5-2.5S12 3 12 8z" />
+          <path d="M3 12.5h18" />
         </svg>
       );
     case "indicacao":
@@ -1296,6 +1333,7 @@ function Manager({
   const menu: { id: Tab; label: string; badge?: number }[] = [
     { id: "dashboard", label: "Dashboard" },
     ...(!data.isAdmin ? [{ id: "renovacao" as Tab, label: "Renovação" }] : []),
+    { id: "indique", label: "Indique e ganhe" },
     { id: "clientes", label: "Clientes", badge: expiringSoon.length },
     { id: "vendas", label: "Vendas" },
     { id: "testes", label: "Testes" },
@@ -1422,6 +1460,7 @@ function Manager({
         {tab === "whatsapp" && <WhatsAppTab data={data} />}
         {tab === "planos" && <PlansTab data={data} onNavigate={setTab} />}
         {tab === "cupons" && <CouponsTab data={data} />}
+        {tab === "indique" && <ReferralTab data={data} />}
         {tab === "indicacao" && <ReferralsTab data={data} onShowClients={showClients} />}
         {tab === "suporte" && <SupportTab data={data} onNavigate={setTab} />}
         {tab === "administracao" && data.isAdmin && <AdminTab data={data} />}
@@ -3289,7 +3328,7 @@ function ServersTab({ data }: { data: State }) {
   const addCredits = useMutation({
     mutationFn: (args: { serverId: number; amount: number; note: string }) => api.addServerCredits(args),
     onSuccess: (r) => {
-      setRechargeMsg(`Recarga feita. Novo saldo: ${r.creditsBalance} créditos.`);
+      setRechargeMsg(`Recarga feita. Novo saldo: ${fmtCredits(r.creditsBalance)} créditos.`);
       setRechargeAmount("");
       setRechargeNote("");
       invalidate();
@@ -3333,7 +3372,7 @@ function ServersTab({ data }: { data: State }) {
           <p className="mt-0.5 text-sm text-[var(--dim)]">Servidores</p>
         </div>
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
-          <p className="font-display text-3xl font-extrabold">{totalCredits}</p>
+          <p className="font-display text-3xl font-extrabold">{fmtCredits(totalCredits)}</p>
           <p className="mt-0.5 text-sm text-[var(--dim)]">Créditos no total</p>
         </div>
         <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
@@ -3384,12 +3423,12 @@ function ServersTab({ data }: { data: State }) {
                 <li key={l.id} className="flex flex-wrap items-baseline justify-between gap-2 py-2 text-sm">
                   <span>
                     <strong className={l.delta >= 0 ? "text-[var(--card-green)]" : "text-[var(--card-red)]"}>
-                      {l.delta >= 0 ? "+" : ""}{l.delta}
+                      {l.delta >= 0 ? "+" : ""}{fmtCredits(l.delta)}
                     </strong>{" "}
                     — {l.note} <span className="text-[var(--dim)]">({l.serverName})</span>
                   </span>
                   <span className="text-[var(--dim)]">
-                    saldo: {l.balanceAfter} • {new Date(l.createdAt).toLocaleString("pt-BR")}
+                    saldo: {fmtCredits(l.balanceAfter)} • {new Date(l.createdAt).toLocaleString("pt-BR")}
                   </span>
                 </li>
               ))}
@@ -3440,7 +3479,11 @@ function ServersTab({ data }: { data: State }) {
               <div className="mt-3 grid grid-cols-3 gap-3 text-center">
                 <div className="rounded-xl bg-[var(--surface2)] p-3">
                   <p className="text-xs font-bold uppercase tracking-wide text-[var(--dim)]">Créditos</p>
-                  <p className="mt-0.5 font-display text-2xl font-extrabold">{s.creditsBalance}</p>
+                  <p className="mt-0.5 font-display text-2xl font-extrabold">{fmtCredits(s.creditsBalance)}</p>
+                  <p className="mt-1 text-left text-[11px] leading-snug text-[var(--dim)]">
+                    Controle local: a API do painel não informa o saldo; este valor acompanha renovações, recargas e ajustes manuais. Confira no painel.
+                    {s.creditsBalanceUpdatedAt ? ` Atualizado em ${new Date(s.creditsBalanceUpdatedAt).toLocaleString("pt-BR")}.` : ""}
+                  </p>
                   <button
                     type="button"
                     className="mt-1 text-sm font-semibold text-[var(--accent-bright)] underline"
@@ -3470,9 +3513,9 @@ function ServersTab({ data }: { data: State }) {
                   aria-label={`Recarregar créditos de ${s.name}`}
                   onSubmit={(e) => {
                     e.preventDefault();
-                    const amount = Number(rechargeAmount);
-                    if (!Number.isInteger(amount) || amount <= 0) {
-                      setRechargeMsg("Informe uma quantidade de créditos maior que zero.");
+                    const amount = Number(rechargeAmount.replace(",", "."));
+                    if (!Number.isFinite(amount) || amount <= 0) {
+                      setRechargeMsg("Informe uma quantidade de créditos maior que zero. Decimais são aceitos (ex.: 2,5).");
                       return;
                     }
                     addCredits.mutate({ serverId: s.id, amount, note: rechargeNote.trim() });
@@ -3483,7 +3526,8 @@ function ServersTab({ data }: { data: State }) {
                     <input
                       id={`recharge-amount-${s.id}`}
                       type="number"
-                      min={1}
+                      min={0.01}
+                      step="0.01"
                       className="w-36 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-base"
                       value={rechargeAmount}
                       onChange={(e) => setRechargeAmount(e.target.value)}
@@ -3685,6 +3729,11 @@ function ServerModal({
   const [name, setName] = useState(initial?.name ?? "");
   const [identifier, setIdentifier] = useState(initial?.identifier ?? "");
   const [initialCredits, setInitialCredits] = useState("0");
+  // Saldo atual editável (só na edição): pré-preenchido com o saldo
+  // decimal atual; na criação, o saldo nasce com Créditos Iniciais.
+  const [creditsBalanceText, setCreditsBalanceText] = useState(
+    initial ? String(initial.creditsBalance ?? 0) : "",
+  );
   const [costText, setCostText] = useState(
     initial ? (initial.costPerCreditCents / 100).toFixed(2).replace(".", ",") : "0,00",
   );
@@ -3733,6 +3782,9 @@ function ServerModal({
         extendBody: extendBody.trim(),
         identifier: identifier.trim(),
         initialCredits: initial ? 0 : Math.max(0, Math.trunc(Number(initialCredits) || 0)),
+        creditsBalance: initial
+          ? Math.round(Number(creditsBalanceText.replace(",", ".")) * 100) / 100
+          : undefined,
         costPerCreditCents: parseBRL(costText) ?? 0,
         chargeByScreens,
         notes: notes.trim(),
@@ -3801,6 +3853,13 @@ function ServerModal({
     if (showAdvanced && costText.trim() && parseBRL(costText) == null) {
       setError("Nas Opções avançadas, o custo por crédito está inválido. Use o formato 2,00.");
       return;
+    }
+    if (initial) {
+      const bal = Number(creditsBalanceText.replace(",", "."));
+      if (!Number.isFinite(bal) || bal < 0) {
+        setError("O saldo de créditos atual precisa ser um número maior ou igual a zero (decimais são aceitos, ex.: 4,53).");
+        return;
+      }
     }
     if (showAdvanced && integrationMode === "vinculada" && !panelIntegrationId) {
       setError("Nas Opções avançadas, escolha a integração de painel para vincular, ou troque o modo de integração.");
@@ -3884,11 +3943,9 @@ function ServerModal({
                 <div className="grid grid-cols-2 gap-3">
                   {initial ? (
                     <div>
-                      <span className={labelCls}>Créditos atuais</span>
-                      <p className="rounded-lg border border-[var(--border)] bg-[var(--surface2)] px-3 py-2.5 font-display text-lg font-bold">
-                        {initial.creditsBalance}
-                      </p>
-                      <p className="mt-1 text-sm text-[var(--dim)]">Use “Recarregar” no cartão do servidor para controle detalhado</p>
+                      <label htmlFor="s-credits-current" className={labelCls}>Créditos atuais no painel</label>
+                      <input id="s-credits-current" type="number" min={0} step="0.01" className={inputCls} value={creditsBalanceText} onChange={(e) => setCreditsBalanceText(e.target.value)} inputMode="decimal" />
+                      <p className="mt-1 text-sm text-[var(--dim)]">Controle local: a API do painel não informa o saldo. Ajuste aqui o valor que está no painel; a mudança fica registrada nas transações. Use “Recarregar” no cartão do servidor para somar créditos.</p>
                     </div>
                   ) : (
                     <div>
@@ -6521,6 +6578,173 @@ function ReferralsTab({
   );
 }
 
+/* ---------------- Indique e ganhe (indicação de CONTAS) ---------------- */
+// Indicação de contas do gestor — diferente da aba "Indicação de
+// Clientes" (que registra quem indicou cada cliente IPTV). Aqui o
+// link é de cadastro no gestor: quem se cadastra pelo link fica
+// vinculado a quem indicou, e a recompensa em dias de assinatura só
+// é concedida quando a pessoa indicada ASSINA e PAGA. Não há
+// retirada dos dias depois (sem clawback), nem recompensa só por
+// cadastro. A administradora não recebe recompensa e define quantos
+// dias vale cada indicação confirmada (0 desliga as recompensas).
+function ReferralTab({ data }: { data: State }) {
+  const queryClient = useQueryClient();
+  const referral = data.referral;
+  const [copied, setCopied] = useState(false);
+  const [rewardDaysText, setRewardDaysText] = useState(
+    String(data.adminSettings?.referralRewardDays ?? referral.rewardDays),
+  );
+  const [rewardMsg, setRewardMsg] = useState<string | null>(null);
+
+  const base = (data.publicBaseUrl ?? "").trim().replace(/\/+$/, "");
+  const link = referral.code
+    ? `${base || window.location.origin}/#/cadastro?ref=${referral.code}`
+    : "";
+
+  const saveReward = useMutation({
+    mutationFn: () =>
+      api.saveReferralSettings({ referralRewardDays: Math.trunc(Number(rewardDaysText)) }),
+    onSuccess: () => {
+      setRewardMsg("Dias de recompensa salvos.");
+      queryClient.invalidateQueries({ queryKey: ["state"] });
+    },
+    onError: (e) => setRewardMsg(friendlyAuthError(e)),
+  });
+
+  async function copyLink() {
+    if (!link) return;
+    const ok = await copyText(link);
+    setCopied(ok);
+    if (ok) setTimeout(() => setCopied(false), 2500);
+  }
+
+  return (
+    <section aria-label="Indique e ganhe" className="mt-5 space-y-5 lg:mt-8">
+      <div>
+        <h2 className="font-display text-2xl font-extrabold">Indique e ganhe</h2>
+        <p className="mt-1 max-w-2xl text-sm text-[var(--dim)]">
+          Compartilhe seu link de indicação: quem criar a conta por ele fica vinculado a você.
+          Quando essa pessoa assinar e pagar, você ganha dias de assinatura — nunca só pelo cadastro.
+        </p>
+      </div>
+
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <p className="text-sm font-semibold text-[var(--dim)]">Seu link de indicação</p>
+        {link ? (
+          <>
+            <p className="mt-1 break-all font-mono text-sm">{link}</p>
+            <button type="button" className={`${btnPrimary} mt-3`} onClick={() => void copyLink()}>
+              {copied ? "Link copiado ✓" : "Copiar link"}
+            </button>
+          </>
+        ) : (
+          <p className="mt-1 text-sm text-[var(--dim)]">Gerando seu link de indicação… recarregue a página em alguns instantes.</p>
+        )}
+        <p className="mt-3 text-sm text-[var(--dim)]">
+          Como funciona: a pessoa se cadastra pelo seu link → ela assina e paga → você ganha{" "}
+          <strong className="text-[var(--text)]">{referral.rewardDays} dia{referral.rewardDays === 1 ? "" : "s"}</strong> de assinatura, somados ao seu período atual.
+          A recompensa só vale quando o pagamento é confirmado. Os dias ganhos não são retirados depois, mesmo se a assinatura indicada for reembolsada.
+          {referral.rewardDays === 0 && " No momento as recompensas estão desligadas pela administradora."}
+        </p>
+      </div>
+
+      <div className="grid grid-cols-3 gap-3">
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <p className="font-display text-3xl font-extrabold">{referral.registeredCount}</p>
+          <p className="mt-0.5 text-sm text-[var(--dim)]">Cadastros pelo link</p>
+        </div>
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <p className="font-display text-3xl font-extrabold">{referral.subscribedCount}</p>
+          <p className="mt-0.5 text-sm text-[var(--dim)]">Assinaturas confirmadas</p>
+        </div>
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <p className="font-display text-3xl font-extrabold">{referral.daysEarned}</p>
+          <p className="mt-0.5 text-sm text-[var(--dim)]">Dias ganhos</p>
+        </div>
+      </div>
+
+      {data.isAdmin && (
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <h3 className="font-display text-lg font-bold">Recompensa por indicação (só administradora)</h3>
+          <p className="mt-1 text-sm text-[var(--dim)]">
+            Dias de assinatura concedidos a quem indicou uma conta que pagou. 0 desliga as recompensas. A conta administradora não recebe recompensa.
+          </p>
+          <form
+            className="mt-3 flex flex-wrap items-end gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              const n = Number(rewardDaysText);
+              if (!Number.isInteger(n) || n < 0 || n > 365) {
+                setRewardMsg("Informe um número inteiro de 0 a 365 dias.");
+                return;
+              }
+              saveReward.mutate();
+            }}
+          >
+            <div>
+              <label htmlFor="referral-days" className={labelCls}>Dias por indicação confirmada</label>
+              <input
+                id="referral-days"
+                type="number"
+                min={0}
+                max={365}
+                step={1}
+                className="w-32 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-base"
+                value={rewardDaysText}
+                onChange={(e) => setRewardDaysText(e.target.value)}
+              />
+            </div>
+            <button type="submit" className={btnPrimary} disabled={saveReward.isPending}>
+              {saveReward.isPending ? "Salvando…" : "Salvar"}
+            </button>
+            {rewardMsg && <p className="w-full text-sm font-medium">{rewardMsg}</p>}
+          </form>
+        </div>
+      )}
+
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+        <h3 className="font-display text-lg font-bold">Suas indicações premiadas</h3>
+        {referral.rewards.length === 0 ? (
+          <p className="mt-2 text-sm text-[var(--dim)]">
+            Nenhuma recompensa ainda. As recompensas aparecem aqui quando alguém que se cadastrou pelo seu link assina e paga.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {referral.rewards.map((r, i) => (
+              <li key={`${r.referredEmail}-${r.grantedAt}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[var(--surface2)] px-3 py-2.5 text-sm">
+                <span className="min-w-0 flex-1 break-all font-semibold">{r.referredEmail}</span>
+                <span>
+                  +{r.daysGranted} dia{r.daysGranted === 1 ? "" : "s"} • {fmtDate(r.grantedAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {data.isAdmin && referral.allRewards.length > 0 && (
+        <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <h3 className="font-display text-lg font-bold">Todas as indicações premiadas</h3>
+          <ul className="mt-3 space-y-2">
+            {referral.allRewards.map((r, i) => (
+              <li key={`${r.referrerEmail}-${r.referredEmail}-${r.grantedAt}-${i}`} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[var(--surface2)] px-3 py-2.5 text-sm">
+                <span className="min-w-0 flex-1 break-all">
+                  <span className="font-semibold">{r.referrerEmail}</span>
+                  <span className="text-[var(--dim)]"> indicou </span>
+                  <span className="font-semibold">{r.referredEmail}</span>
+                </span>
+                <span>
+                  +{r.daysGranted} dia{r.daysGranted === 1 ? "" : "s"} • {fmtDate(r.grantedAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /* ---------------- Integrações ---------------- */
 
 type IntegrationSub = "paineis" | "mensagens" | "ajustes";
@@ -7378,6 +7602,7 @@ const BACKUP_COUNT_LABELS: Record<string, string> = {
   coupons: "cupom(ns)",
   settings: "configuração(ões)",
   subscriptionPayments: "pagamento(s) de assinatura",
+  referralRewards: "indicação(ões) premiada(s)",
 };
 
 function summarizeBackupFile(text: string): { summary: BackupSummary } | { error: string } {
