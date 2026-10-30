@@ -381,10 +381,6 @@ function AuthScreen({
       </div>
       <main className="relative z-10 w-full max-w-md">
         <img src={gestorFlexLogo} alt="Gestor Flex" className="mx-auto h-28 w-auto object-contain drop-shadow-[0_10px_30px_rgba(20,179,208,0.35)] sm:h-32" />
-        <p className="mt-2 text-center text-sm text-[var(--dim)]">
-          Cada conta tem os seus próprios clientes, servidores, planos e WhatsApp.
-          Conta nova começa do zero, vazia.
-        </p>
         <div aria-hidden="true" className="mx-auto mt-5 flex max-w-sm items-center justify-center gap-2 text-[11px] font-semibold text-[#9fb4cc]">
           <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1">Pix aprovado</span>
           <span className="auth-flow-line w-6 shrink-0" />
@@ -462,6 +458,17 @@ function AuthScreen({
             />
           </div>
           )}
+          {mode === "entrar" && (
+            <div className="text-right">
+              <button
+                type="button"
+                className="text-sm font-semibold text-[var(--accent-bright)]"
+                onClick={() => { setMode("esqueci"); setError(null); }}
+              >
+                Esqueci a senha
+              </button>
+            </div>
+          )}
           {error && (
             <p className="rounded-lg bg-[var(--danger-bg)] px-3 py-2 text-sm font-medium text-[var(--danger)]" role="alert">
               {error}
@@ -470,15 +477,6 @@ function AuthScreen({
           <button type="submit" className="w-full rounded-lg bg-[var(--accent)] px-4 py-3 font-display text-base font-bold text-[var(--accent-ink)] disabled:opacity-50" disabled={pending}>
             {pending ? "Aguarde…" : mode === "criar" ? "Criar minha conta" : mode === "esqueci" ? "Enviar link de redefinição" : "Entrar"}
           </button>
-          {mode === "entrar" && (
-            <button
-              type="button"
-              className="w-full text-center text-sm font-semibold text-[var(--accent-bright)]"
-              onClick={() => { setMode("esqueci"); setError(null); }}
-            >
-              Esqueci a senha
-            </button>
-          )}
           {mode === "esqueci" && (
             <button
               type="button"
