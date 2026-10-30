@@ -26,6 +26,59 @@ function fmtDate(d: Date): string {
   });
 }
 
+
+// Horário de São Paulo, sempre: saudação e janela de avisos usam o
+// relógio da dona do gestor, não o fuso do servidor (o Render roda em
+// UTC). "hour: 24" do formato 24h vira 0 (meia-noite).
+function saoPauloParts(now: Date): { dateStr: string; hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+  const get = (type: string) => parts.find((x) => x.type === type)?.value ?? "0";
+  let hour = Number(get("hour"));
+  if (hour === 24) hour = 0;
+  return {
+    dateStr: `${get("year")}-${get("month")}-${get("day")}`,
+    hour,
+    minute: Number(get("minute")),
+  };
+}
+
+// Saudação pela hora de São Paulo: bom dia 05:00-11:59, boa tarde
+// 12:00-17:59, boa noite 18:00-04:59. Calculada NA HORA DO ENVIO,
+// nunca guardada — uma nova tentativa usa sempre o período atual.
+export function greetingFor(now: Date): "Bom dia" | "Boa tarde" | "Boa noite" {
+  const { hour } = saoPauloParts(now);
+  if (hour >= 5 && hour < 12) return "Bom dia";
+  if (hour >= 12 && hour < 18) return "Boa tarde";
+  return "Boa noite";
+}
+
+// Dias que faltam para o vencimento, com a MESMA conta que a tela usa
+// (teto da diferença em dias): 1 = vence amanhã, 0 = vence hoje,
+// -1 = venceu ontem. O scheduler e a tela nunca discordam do dia.
+function daysLeftFrom(now: Date, expiresAt: Date): number {
+  return Math.ceil((expiresAt.getTime() - now.getTime()) / 86_400_000);
+}
+
+// Horário escalonado de cada cliente dentro da janela 07:00-09:00:
+// determinístico (só depende do id), estável entre reinícios, para os
+// avisos não saírem todos no mesmo minuto.
+function warningSlotMinute(clientId: number): number {
+  let hash = 2166136261;
+  for (const ch of String(clientId)) {
+    hash ^= ch.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return 420 + (Math.abs(hash) % 120);
+}
+
 function renderTemplate(
   tpl: string,
   vars: {
@@ -39,6 +92,7 @@ function renderTemplate(
     link?: string;
     telefone?: string;
     diasVencido?: number;
+    saudacao?: string;
   },
 ): string {
   return tpl
@@ -51,19 +105,20 @@ function renderTemplate(
     .replaceAll("{plano}", vars.plano ?? "")
     .replaceAll("{link}", vars.link ?? "")
     .replaceAll("{telefone}", vars.telefone ?? "")
-    .replaceAll("{dias_vencido}", vars.diasVencido != null ? String(vars.diasVencido) : "");
+    .replaceAll("{dias_vencido}", vars.diasVencido != null ? String(vars.diasVencido) : "")
+    .replaceAll("{saudacao}", vars.saudacao ?? "");
 }
 
 const TEMPLATE_VENCE_HOJE =
-  "Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+  "{saudacao} {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
 const TEMPLATE_VENCE_3_DIAS =
-  "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+  "{saudacao} {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
 const TEMPLATE_RENOVADA =
-  "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.";
+  "{saudacao} {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.";
 const TEMPLATE_EXPIRADA =
-  "Bom dia {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+  "{saudacao} {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
 const TEMPLATE_VENCE_AMANHA =
-  "Bom dia {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
+  "{saudacao} {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!";
 
 // Modelos antigos (padrão do sistema, com tudo numa frase só): contas
 // que nunca personalizaram o modelo passam a ver o modelo novo, no
@@ -73,18 +128,28 @@ const LEGACY_TEMPLATES: Record<string, string[]> = {
   warnMessage: [
     "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: abra a sua fatura e pague com Pix: {link}",
     "Olá, {nome}! Sua assinatura vence em {vencimento}. Renove para não ficar sem acesso: toque no seu link de renovação e pague com Pix.",
+    "Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
   ],
   renewedMessage: [
     "Pagamento confirmado! ✅ Olá, {nome}! Sua assinatura foi renovada por {dias} dias. Novo vencimento: {novo_vencimento}. Usuário IPTV: {usuario}. Obrigado!",
+    "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.",
   ],
   expiredMessage: [
     "Olá, {nome}. Sua assinatura expirou em {vencimento} (há {dias_vencido} dias). Para voltar a assistir, abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
     "Olá, {nome}. Sua assinatura expirou em {vencimento}. Para voltar a assistir, renove pelo seu link de renovação e pague com Pix. Qualquer dúvida, é só chamar aqui.",
     "Bom dia {nome}! 🔔\n\nSeu acesso venceu em {vencimento}!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+    "Bom dia {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
   ],
   chargeMessage: [
     "Olá, {nome}! Passando para lembrar da sua assinatura {plano}, no valor de {valor}, com vencimento em {vencimento}. Para renovar é rapidinho: abra a sua fatura e pague com Pix: {link} Qualquer dúvida, é só chamar aqui.",
     "Bom dia {nome}! 🔔\n\nPassando para lembrar da sua assinatura:\n\n📋 Plano: {plano}\n💰 Valor: {valor}\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+    "Bom dia {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+  ],
+  // Padrões antigos com saudação fixa: contas que nunca editaram o
+  // modelo passam a ver a versão com {saudacao}. Um texto que a dona
+  // editou (diferente destes) nunca é trocado.
+  warnSoonMessage: [
+    "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
   ],
 };
 
@@ -151,7 +216,7 @@ async function loadSettings(ctx: Ctx, ownerId: number): Promise<SettingsObj> {
     invoiceMessage: row.invoiceMessage,
     invoiceColor: row.invoiceColor,
     warnMessage: upgradeLegacyTemplate(row.warnMessage, LEGACY_TEMPLATES.warnMessage ?? [], TEMPLATE_VENCE_HOJE),
-    warnSoonMessage: row.warnSoonMessage ?? DEFAULTS.warnSoonMessage,
+    warnSoonMessage: upgradeLegacyTemplate(row.warnSoonMessage ?? DEFAULTS.warnSoonMessage, LEGACY_TEMPLATES.warnSoonMessage ?? [], TEMPLATE_VENCE_3_DIAS),
     renewedMessage: upgradeLegacyTemplate(row.renewedMessage, LEGACY_TEMPLATES.renewedMessage ?? [], TEMPLATE_RENOVADA),
     expiredMessage: upgradeLegacyTemplate(row.expiredMessage, LEGACY_TEMPLATES.expiredMessage ?? [], TEMPLATE_EXPIRADA),
     chargeMessage: upgradeLegacyTemplate(
@@ -2053,6 +2118,7 @@ async function applyRenewal(
   const newExpires = new Date(now.getTime() + plan.days * 24 * 60 * 60 * 1000);
   const message = renderTemplate(settingsObj.renewedMessage, {
     nome: client.name,
+    saudacao: greetingFor(new Date()),
     usuario: client.iptvUser,
     vencimento: fmtDate(client.expiresAt),
     novoVencimento: fmtDate(newExpires),
@@ -3156,6 +3222,179 @@ function remapBackupId(map: Map<number, number>, value: unknown): number | null 
   return map.get(n) ?? null;
 }
 
+
+
+// ---------------- Avisos automáticos de vencimento ----------------
+// Disparo automático, sem envio manual: só 3 momentos — 1 dia antes
+// ("vence amanhã"), no dia ("vence hoje") e 1 dia depois de vencer
+// ("acesso expirado"). O aviso de 3 dias antes NÃO sai automático
+// (só manual, pelo botão "Enviar mensagem"). Janela 07:00-09:00 de
+// São Paulo, uma vez por dia por cliente, em horário escalonado por
+// cliente (para não sair tudo no mesmo minuto). Fora da janela não
+// há envio nem "recuperação" depois das 09:00: o aviso do dia fica
+// para o próximo dia em que o cliente ainda estiver num dos 3
+// momentos. No plano gratuito o servidor dorme sem acesso e o
+// intervalo não roda — ao acordar dentro da janela, os avisos devidos
+// saem no próximo ciclo (atrasados, mas uma vez só, graças à tabela
+// warning_sends). A falha de um cliente nunca trava os outros.
+export async function sendDueWarnings(
+  ctx: Ctx,
+  now: Date = new Date(),
+): Promise<{ sent: number; failed: number; detail: string }> {
+  const db = ctx.db<typeof schema>();
+  const sp = saoPauloParts(now);
+  const minuteOfDay = sp.hour * 60 + sp.minute;
+  if (minuteOfDay < 420 || minuteOfDay >= 540) {
+    return { sent: 0, failed: 0, detail: "Fora da janela de avisos (07:00-09:00, São Paulo)." };
+  }
+  const timeLabel = `${String(sp.hour).padStart(2, "0")}:${String(sp.minute).padStart(2, "0")}`;
+  let sent = 0;
+  let failed = 0;
+  const accounts = await db.select().from(schema.accounts);
+  for (const account of accounts) {
+    try {
+      // Conta do gestor bloqueada (assinatura vencida) não dispara
+      // avisos: a cobrança Pix dela também está bloqueada, então o
+      // aviso levaria o cliente a uma fatura que não gera Pix.
+      const access = await loadAccountAccess(ctx, account.id);
+      if (access?.blocked) continue;
+      const settingsObj = await loadSettings(ctx, account.id);
+      const clients = await db
+        .select()
+        .from(schema.clients)
+        .where(
+          and(
+            eq(schema.clients.ownerId, account.id),
+            eq(schema.clients.listState, "normal"),
+            eq(schema.clients.isTest, 0),
+          ),
+        );
+      const plans = await db
+        .select()
+        .from(schema.plans)
+        .where(eq(schema.plans.ownerId, account.id));
+      const planById = new Map<number, typeof schema.plans.$inferSelect>(plans.map((plan) => [plan.id, plan]));
+      const due: Array<{
+        client: (typeof clients)[number];
+        kind: string;
+        template: string;
+        slot: number;
+      }> = [];
+      for (const client of clients) {
+        const left = daysLeftFrom(now, client.expiresAt);
+        let kind: string | null = null;
+        let template: string | null = null;
+        if (left === 1) {
+          kind = "vence_amanha";
+          template = settingsObj.chargeMessage;
+        } else if (left === 0) {
+          kind = "vence_hoje";
+          template = settingsObj.warnMessage;
+        } else if (left === -1) {
+          kind = "vencido";
+          template = settingsObj.expiredMessage;
+        } else {
+          continue;
+        }
+        const slot = warningSlotMinute(client.id);
+        if (minuteOfDay < slot) continue;
+        due.push({ client, kind, template: template!, slot });
+      }
+      due.sort((a, b) => a.slot - b.slot);
+      let attemptsThisAccount = 0;
+      for (const item of due) {
+        if (attemptsThisAccount >= 5) break;
+        const { client, kind, template } = item;
+        const to = (client.whatsapp ?? "").replace(/\D/g, "");
+        if (!to) continue;
+        // Reserva atômica ("claim"): a linha 'enviado' é inserida
+        // ANTES do envio; o índice parcial UNIQUE impede que outro
+        // ciclo (ou reinício) reserve o mesmo aviso no mesmo dia.
+        const already = await db
+          .select()
+          .from(schema.warningSends)
+          .where(
+            and(
+              eq(schema.warningSends.ownerId, account.id),
+              eq(schema.warningSends.clientId, client.id),
+              eq(schema.warningSends.kind, kind),
+              eq(schema.warningSends.sentDate, sp.dateStr),
+              eq(schema.warningSends.status, "enviado"),
+            ),
+          );
+        if (already.length > 0) continue;
+        let claimId: number | null = null;
+        try {
+          const inserted = await db
+            .insert(schema.warningSends)
+            .values({
+              ownerId: account.id,
+              clientId: client.id,
+              kind,
+              sentDate: sp.dateStr,
+              status: "enviado",
+              detail: "Aviso automático agendado.",
+            })
+            .returning({ id: schema.warningSends.id });
+          claimId = inserted[0]?.id ?? null;
+        } catch {
+          // Conflito de unicidade: outro ciclo reservou primeiro.
+          continue;
+        }
+        if (claimId == null) continue;
+        attemptsThisAccount += 1;
+        const tokens = await ensureInvoiceTokens(ctx, [client]);
+        const token = tokens.get(client.id) ?? client.invoiceToken;
+        const base = settingsObj.publicBaseUrl.trim().replace(/\/+$/, "");
+        const link = base && token ? `${base}/#/fatura/${token}` : "";
+        const plan = client.planId != null ? planById.get(client.planId) : undefined;
+        const text = renderTemplate(template, {
+          nome: client.name,
+          saudacao: greetingFor(now),
+          usuario: client.iptvUser,
+          vencimento: fmtDate(client.expiresAt),
+          dias: plan?.days,
+          diasVencido: kind === "vencido" ? 1 : 0,
+          valor: plan ? fmtBRL(client.priceOverrideCents ?? plan.priceCents) : "",
+          plano: plan?.name,
+          link,
+        });
+        try {
+          const result = await ctx.executePrivileged(privileged.waSend, {
+            accountId: account.id,
+            to,
+            text,
+          });
+          if (result.sent) {
+            sent += 1;
+            await db
+              .update(schema.warningSends)
+              .set({
+                sentAt: new Date(),
+                detail: `Aviso automático (${kind}) enviado às ${timeLabel} pelo WhatsApp ✓`,
+              })
+              .where(eq(schema.warningSends.id, claimId));
+          } else {
+            failed += 1;
+            await db
+              .update(schema.warningSends)
+              .set({ status: "falhou", detail: `Aviso automático não enviado: ${result.detail}` })
+              .where(eq(schema.warningSends.id, claimId));
+          }
+        } catch (e) {
+          failed += 1;
+          await db
+            .update(schema.warningSends)
+            .set({ status: "falhou", detail: `Aviso automático não enviado: ${String(e)}` })
+            .where(eq(schema.warningSends.id, claimId));
+        }
+      }
+    } catch (err) {
+      console.error(`[avisos] falha na conta ${account.id}:`, err);
+    }
+  }
+  return { sent, failed, detail: `Avisos automáticos: ${sent} enviado(s), ${failed} falhou/falharam.` };
+}
 
 export const Actions = {
   getState: defineAction({
@@ -4908,6 +5147,7 @@ export const Actions = {
           const would = new Date(Date.now() + plan.days * 24 * 60 * 60 * 1000);
           const message = renderTemplate(s.renewedMessage, {
             nome: client.name,
+            saudacao: greetingFor(new Date()),
             usuario: client.iptvUser,
             vencimento: fmtDate(client.expiresAt),
             novoVencimento: fmtDate(would),
@@ -5203,6 +5443,7 @@ export const Actions = {
       const would = new Date(Date.now() + plan.days * 24 * 60 * 60 * 1000);
       const message = renderTemplate(s.renewedMessage, {
         nome: client.name,
+        saudacao: greetingFor(new Date()),
         usuario: client.iptvUser,
         vencimento: fmtDate(client.expiresAt),
         novoVencimento: fmtDate(would),

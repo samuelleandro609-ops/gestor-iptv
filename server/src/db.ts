@@ -59,7 +59,7 @@ export async function createDb(): Promise<Db> {
  *  bancos que já as têm). A migration 006 adiciona o segredo da API
  *  TopSul (api_secret) às integrações. */
 export async function migrate(db: Db): Promise<void> {
-  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql", "006_topsul.sql"]) {
+  for (const file of ["001_init.sql", "002_admin_trial.sql", "003_sigma.sql", "004_sigma_browser.sql", "005_sigma_browser_diagnostic.sql", "006_topsul.sql", "007_warning_sends.sql"]) {
     const sqlText = readFileSync(
       join(import.meta.dir, "..", "..", "migrations", file),
       "utf8",

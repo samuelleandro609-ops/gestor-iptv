@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
-import { Actions } from "./actions";
+import { Actions, sendDueWarnings } from "./actions";
 import { createCtx } from "./ctx";
 import { closeDb, createDb, migrate, type Db } from "./db";
 
@@ -48,6 +48,23 @@ async function main(): Promise<void> {
     }
   }, 60_000);
   syncTimer.unref?.();
+
+  // Avisos automáticos de vencimento a cada 60 segundos: só dispara
+  // entre 07:00 e 09:00 (São Paulo), uma vez por dia por cliente, em
+  // horário escalonado (ver sendDueWarnings em actions.ts). Fora da
+  // janela o ciclo não faz nada. No plano gratuito o serviço dorme
+  // sem acesso e o intervalo não roda — ao acordar dentro da janela,
+  // os avisos devidos saem no próximo ciclo; fora dela, ficam para o
+  // próximo dia em que o cliente ainda estiver num dos 3 momentos
+  // (vence amanhã, vence hoje, venceu ontem).
+  const warnTimer = setInterval(async () => {
+    try {
+      await sendDueWarnings(ctx);
+    } catch (err) {
+      console.error("[avisos] falha no disparo automático:", err);
+    }
+  }, 60_000);
+  warnTimer.unref?.();
 
   const server = Bun.serve({
     port: PORT,
@@ -113,6 +130,7 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     clearInterval(syncTimer);
+    clearInterval(warnTimer);
     server.stop();
     await closeDb();
     process.exit(0);

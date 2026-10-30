@@ -1,4 +1,5 @@
-import { bigint, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { bigint, index, integer, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // Contas de acesso ao gestor: o gestor é usado por várias pessoas e
 // TODOS os dados (servidores, clientes, planos, vendas, transações,
@@ -395,12 +396,12 @@ export const settings = pgTable("settings", {
   renewedMessage: text("renewed_message")
     .notNull()
     .default(
-      "Boa tarde {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.",
+      "{saudacao} {nome}! ✅\n\nSua renovação foi confirmada!\n\n📋 Plano: {plano}\n📅 Novo vencimento: {novo_vencimento}\n💰 Valor: {valor}\n\nObrigado pela confiança! Qualquer dúvida, fale conosco.",
     ),
   expiredMessage: text("expired_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "{saudacao} {nome}! 🔔\n\nSeu acesso venceu!\n\n📅 Vencimento: {vencimento}\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   // Modelo "Vence amanhã" do envio direto de mensagem ao cliente
   // (botão Enviar mensagem na lista de clientes): editável na aba
@@ -409,7 +410,7 @@ export const settings = pgTable("settings", {
   chargeMessage: text("charge_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "{saudacao} {nome}! 🔔\n\nSeu acesso vence amanhã!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   whatsappStatus: text("whatsapp_status")
     .notNull()
@@ -448,14 +449,14 @@ export const settings = pgTable("settings", {
   warnMessage: text("warn_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "{saudacao} {nome}! 🔔\n\nSeu acesso vence hoje!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   // Aviso de 3 dias antes: modelo separado, no mesmo estilo, porque
   // a frase muda ("vence em 3 dias", e não "vence hoje").
   warnSoonMessage: text("warn_soon_message")
     .notNull()
     .default(
-      "Bom dia {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
+      "{saudacao} {nome}! 🔔\n\nSeu acesso vence em 3 dias!\n\n📌 Segue o link abaixo para efetuar pagamento:\n🔗 {link}\n\nConte conosco!",
     ),
   // E-mail (Resend) e valor padrão da assinatura, configurados pela
   // administradora. A chave do Resend fica só no banco e NUNCA volta
@@ -466,3 +467,29 @@ export const settings = pgTable("settings", {
   resendFrom: text("resend_from").notNull().default(""),
   defaultSubPriceCents: integer("default_sub_price_cents").notNull().default(0),
 });
+
+// Registro dos avisos automáticos de vencimento (scheduler 07h-09h):
+// uma linha por conta + cliente + tipo + dia (data de São Paulo).
+// O índice parcial UNIQUE só vale para linhas 'enviado': é ele que
+// garante um envio por dia mesmo com reinício, e uma falha libera a
+// vaga para tentar de novo no mesmo dia. Não entra no backup (é
+// registro transitório de envio, não dado do negócio).
+export const warningSends = pgTable(
+  "warning_sends",
+  {
+    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
+    ownerId: integer("owner_id").notNull().default(0),
+    clientId: integer("client_id").notNull(),
+    kind: text("kind").notNull(),
+    sentDate: text("sent_date").notNull(),
+    sentAt: timestamp("sent_at", { mode: "date", precision: 3 }),
+    status: text("status").notNull().default("enviado"),
+    detail: text("detail").notNull().default(""),
+  },
+  (t) => [
+    uniqueIndex("warning_sends_once_per_day_idx")
+      .on(t.ownerId, t.clientId, t.kind, t.sentDate)
+      .where(sql`${t.status} = 'enviado'`),
+    index("warning_sends_owner_idx").on(t.ownerId, t.sentDate),
+  ],
+);
