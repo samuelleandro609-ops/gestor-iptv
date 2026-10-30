@@ -596,12 +596,16 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
   // paleta neutra escura, sem a cor do tema salvo (verde), para a
   // imagem de fundo aparecer sem tingimento verde.
   const theme = { main: "#111827", dark: "#0b0f17", soft: "#f3f4f6" };
-  const [pix, setPix] = useState<string | null>(null);
-  const [qr, setQr] = useState<string | null>(null);
+  // Pix pendente já existente para esta renovação: a fatura abre
+  // mostrando o MESMO código/QR Code, sem precisar apertar "Gerar
+  // Pix" de novo (que antes criava outra cobrança pendente a cada
+  // abertura). Sem pendente, começa vazio e o botão gera o Pix.
+  const [pix, setPix] = useState<string | null>(invoice.pendingPayment?.pixCode ?? null);
+  const [qr, setQr] = useState<string | null>(invoice.pendingPayment?.qrDataUrl ?? null);
   const [copied, setCopied] = useState(false);
   const [confirmMsg, setConfirmMsg] = useState<string | null>(null);
-  const [payment, setPayment] = useState<Payment | null>(null);
-  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [payment, setPayment] = useState<Payment | null>(invoice.pendingPayment ?? null);
+  const [statusMsg, setStatusMsg] = useState<string | null>(invoice.pendingPayment?.detail ?? null);
   const [couponCode, setCouponCode] = useState("");
 
   const createPix = useMutation({
