@@ -139,9 +139,28 @@ function warnTemplateFor(
   return data.warnSoonMessage;
 }
 
+// Saudação pela hora de São Paulo (mesmos limites do servidor:
+// bom dia 05:00-11:59, boa tarde 12:00-17:59, boa noite 18:00-04:59).
+// Usada nas prévias e nos envios manuais, para a mensagem mostrada
+// ser a mesma que o cliente recebe.
+function greetingNow(now: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    hour: "numeric",
+    hour12: false,
+  }).formatToParts(now);
+  let hour = Number(parts.find((x) => x.type === "hour")?.value ?? "0");
+  if (hour === 24) hour = 0;
+  if (hour >= 5 && hour < 12) return "Bom dia";
+  if (hour >= 12 && hour < 18) return "Boa tarde";
+  return "Boa noite";
+}
+
 function renderMsg(
   tpl: string,
-  vars: { nome: string; usuario: string; vencimento: string; novoVencimento?: string; dias?: number | null; valor?: string; plano?: string | null; link?: string; telefone?: string; diasVencido?: number | null },
+  vars: { nome: string; usuario: string; vencimento: string; novoVencimento?: string; dias?: number | null; valor?: string; plano?: string | null; link?: string; telefone?: string; diasVencido?: number | null,
+    saudacao?: string,
+  },
 ): string {
   return tpl
     .replaceAll("{nome}", vars.nome)
@@ -153,7 +172,8 @@ function renderMsg(
     .replaceAll("{plano}", vars.plano ?? "")
     .replaceAll("{link}", vars.link ?? "")
     .replaceAll("{telefone}", vars.telefone ?? "")
-    .replaceAll("{dias_vencido}", vars.diasVencido != null ? String(vars.diasVencido) : "");
+    .replaceAll("{dias_vencido}", vars.diasVencido != null ? String(vars.diasVencido) : "")
+    .replaceAll("{saudacao}", vars.saudacao ?? "");
 }
 
 // Dias que a assinatura deste cliente está vencida (0 se ainda não
@@ -176,7 +196,7 @@ function useHashRoute(): string {
 
 const inputCls =
   "w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5 text-base text-[var(--text)]";
-const labelCls = "block text-sm font-medium text-[var(--dim)] mb-1";
+const labelCls = "block text-sm font-semibold text-[var(--dim)] mb-1";
 const btnPrimary =
   "rounded-lg bg-[var(--accent)] px-4 py-2.5 font-semibold text-[var(--accent-ink)] disabled:opacity-50";
 const btnGhost =
@@ -440,7 +460,7 @@ function AuthScreen({
               Voltar para entrar
             </button>
           )}
-          <p className="text-center text-xs text-[var(--dim)]">
+          <p className="text-center text-sm text-[var(--dim)]">
             {mode === "criar"
               ? "Ao criar a conta, você entra direto e já pode cadastrar seus servidores, planos e clientes — tudo separado das outras contas. Você ganha 7 dias de teste grátis."
               : mode === "esqueci"
@@ -805,7 +825,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
               >
                 {createPix.isPending ? "Gerando Pix no Mercado Pago…" : "Gerar Pix real"}
               </button>
-              <p className="mt-2 text-center text-xs text-neutral-500">
+              <p className="mt-2 text-center text-sm text-neutral-700">
                 O valor acima é enviado ao Mercado Pago e a chave gerada é a chave
                 oficial da cobrança.
               </p>
@@ -851,7 +871,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
                     {copied ? "Chave copiada ✓" : "Copiar chave Pix"}
                   </button>
                   {!qr && (
-                    <p className="mt-2 text-center text-xs text-neutral-500">
+                    <p className="mt-2 text-center text-sm text-neutral-700">
                       O QR Code não foi gerado, mas a chave Pix acima funciona normalmente.
                     </p>
                   )}
@@ -919,7 +939,7 @@ function InvoicePage({ invoice, invoiceToken }: { invoice: Invoice; invoiceToken
               )}
 
               {statusMsg && payment.status !== "aprovado_pendente_painel" && (
-                <p className="mt-3 text-center text-xs text-neutral-500">{statusMsg}</p>
+                <p className="mt-3 text-center text-sm text-neutral-700">{statusMsg}</p>
               )}
             </div>
           )}
@@ -1672,7 +1692,7 @@ function ClientRenewalDetail({ data, client }: { data: State; client: Client }) 
             <p className="mt-1 text-[var(--dim)]">Nenhuma cobrança recente para este cliente. A próxima renovação será de {nextDays != null ? `${nextDays} dias (${nextCredits} crédito${nextCredits !== 1 ? "s" : ""})` : "— defina um plano —"} quando o Pix da fatura for pago.</p>
           )}
           {!data.panelExtendReady && !hasPendingPanel && (
-            <p className="mt-1 text-xs text-[var(--dim)]">Status honesto: pagamento aprovado só vira renovação quando a chamada de extensão da API aceita. Até um teste real de extensão passar na aba Servidores, ele entra como “extensão pendente” e nenhum crédito é dado como gasto.</p>
+            <p className="mt-1 text-sm text-[var(--dim)]">Status honesto: pagamento aprovado só vira renovação quando a chamada de extensão da API aceita. Até um teste real de extensão passar na aba Servidores, ele entra como “extensão pendente” e nenhum crédito é dado como gasto.</p>
           )}
         </div>
       </div>
@@ -1829,6 +1849,7 @@ function ClientsTab({
               withInvoiceLink(
                 renderMsg(warnTemplateFor(daysLeft(c.expiresAt), data), {
                   nome: c.name,
+                  saudacao: greetingNow(),
                   usuario: c.iptvUser,
                   vencimento: fmtDate(c.expiresAt),
                   dias: c.planDays,
@@ -1942,7 +1963,7 @@ function ClientsTab({
               </span>
             </div>
             <p className="mt-2 text-sm font-bold" style={{ color: card.color }}>{brl(card.value)}</p>
-            <p className="text-[13px] font-medium text-[var(--dim)]">{card.hint}</p>
+            <p className="text-sm font-semibold text-[var(--dim)]">{card.hint}</p>
           </div>
         ))}
       </div>
@@ -2061,6 +2082,7 @@ function ClientsTab({
               const left = daysLeft(c.expiresAt);
               const msg = renderMsg(warnTemplateFor(left, data), {
                 nome: c.name,
+                saudacao: greetingNow(),
                 usuario: c.iptvUser,
                 vencimento: fmtDate(c.expiresAt),
                 dias: c.planDays,
@@ -2078,10 +2100,11 @@ function ClientsTab({
               );
             })}
           </ul>
-          <p className="mt-2 text-[13px] font-medium text-[var(--dim)]">
-            O texto e os dias de aviso são editáveis em Integrações → Mensagens e Ajustes.
-            O WhatsApp é conectado pelo QR Code, na aba WhatsApp. O botão de
-            cada cliente abre o WhatsApp com a mensagem pronta para você confirmar o envio.
+          <p className="mt-2 text-sm font-semibold text-[var(--dim)]">
+            Os avisos saem sozinhos, sem você precisar enviar: 1 dia antes, no dia do
+            vencimento e 1 dia depois de vencido, entre 7h e 9h, uma vez por dia por cliente.
+            O texto dos modelos é editável em Integrações → Mensagens e Ajustes, e o
+            WhatsApp é conectado pelo QR Code, na aba WhatsApp.
           </p>
         </div>
       )}
@@ -2095,7 +2118,7 @@ function ClientsTab({
       <div className="mt-2 hidden overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)] lg:block">
         <table className="w-full text-left text-sm">
           <thead>
-            <tr className="border-b border-[var(--border)] text-xs uppercase tracking-wide text-[var(--dim)]">
+            <tr className="border-b border-[var(--border)] text-[13px] uppercase tracking-wide text-[var(--dim)]">
               <th scope="col" className="px-4 py-3 font-bold">Cliente</th>
               <th scope="col" className="px-4 py-3 font-bold">WhatsApp</th>
               <th scope="col" className="px-4 py-3 font-bold">Plano</th>
@@ -2121,7 +2144,7 @@ function ClientsTab({
                         </span>
                       )}
                     </p>
-                    <p className="font-mono text-[13px] font-medium text-[var(--dim)]">{c.iptvUser}</p>
+                    <p className="font-mono text-sm font-semibold text-[var(--dim)]">{c.iptvUser}</p>
                   </td>
                   <td className="px-4 py-3 whitespace-nowrap">{c.whatsapp ? c.whatsapp : "—"}</td>
                   <td className="px-4 py-3">{c.planName ?? "—"}</td>
@@ -2329,6 +2352,7 @@ function SendMessageModal({
 
   const rendered = renderMsg(selected.text, {
     nome: client.name,
+    saudacao: greetingNow(),
     usuario: client.iptvUser,
     telefone: client.whatsapp ?? "",
     vencimento: fmtDate(client.expiresAt),
@@ -2402,7 +2426,7 @@ function SendMessageModal({
               <option value="conectado">Dispositivo conectado</option>
             )}
           </select>
-          <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
+          <p className="mt-1 text-sm font-semibold text-[var(--dim)]">
             {connected
               ? "O envio sai automaticamente pelo WhatsApp conectado por QR Code, direto para o número deste cliente."
               : "O WhatsApp não está conectado agora. Você pode montar a mensagem, mas o envio só acontece com o WhatsApp conectado (aba WhatsApp)."}
@@ -2454,7 +2478,7 @@ function SendMessageModal({
                 value={editText}
                 onChange={(e) => setEditText(e.target.value)}
               />
-              <p className="text-[13px] font-medium text-[var(--dim)]">Use {"{nome}"}, {"{vencimento}"}, {"{plano}"}, {"{valor}"} e {"{link}"} — eles viram os dados deste cliente na hora do envio.</p>
+              <p className="text-sm font-semibold text-[var(--dim)]">Use {"{saudacao}"}, {"{nome}"}, {"{vencimento}"}, {"{plano}"}, {"{valor}"} e {"{link}"} — eles viram os dados deste cliente na hora do envio. A {"{saudacao}"} vira Bom dia, Boa tarde ou Boa noite conforme a hora de São Paulo.</p>
               {editError && <p className="text-sm text-[var(--danger)]">{editError}</p>}
               <div className="flex flex-wrap gap-2">
                 <button type="button" className={btnPrimary} disabled={saveTemplate.isPending || !editText.trim()} onClick={() => saveTemplate.mutate()}>
@@ -2467,7 +2491,7 @@ function SendMessageModal({
             </div>
           )}
           {!editing && (
-            <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
+            <p className="mt-1 text-sm font-semibold text-[var(--dim)]">
               Toque no lápis para editar este modelo aqui mesmo; ele também fica salvo na aba Mensagens.
             </p>
           )}
@@ -2881,7 +2905,7 @@ function PlansTab({ data, onNavigate }: { data: State; onNavigate: (tab: Tab) =>
                 <p className="mt-1 font-display text-3xl font-extrabold leading-none" style={{ color: card.color }}>
                   {card.count}
                 </p>
-                <p className="mt-1.5 text-[13px] font-medium text-[var(--dim)]">{card.hint}</p>
+                <p className="mt-1.5 text-sm font-semibold text-[var(--dim)]">{card.hint}</p>
               </div>
             ))}
           </div>
@@ -3110,7 +3134,7 @@ function PanelDiagnosticView({ diagnostic }: { diagnostic: PanelDiagnostic | nul
       {diagnostic.responseBody && (
         <div className="mt-3">
           <p className="text-sm font-semibold">Mensagem exata devolvida pela API (token escondido)</p>
-          <pre className="mt-1 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--surface2)] p-3 font-mono text-xs">{diagnostic.responseBody}</pre>
+          <pre className="mt-1 max-h-44 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--surface2)] p-3 font-mono text-[13px]">{diagnostic.responseBody}</pre>
         </div>
       )}
 
@@ -3126,7 +3150,7 @@ function PanelDiagnosticView({ diagnostic }: { diagnostic: PanelDiagnostic | nul
                 <p className="mt-1 text-[var(--dim)]">{attempt.description}</p>
                 {attempt.error && <p className="mt-1">Erro informado: {attempt.error}</p>}
                 {attempt.responseBody && (
-                  <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--surface)] p-2 font-mono text-xs">{attempt.responseBody}</pre>
+                  <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--surface)] p-2 font-mono text-[13px]">{attempt.responseBody}</pre>
                 )}
               </li>
             ))}
@@ -3142,7 +3166,7 @@ function PanelDiagnosticView({ diagnostic }: { diagnostic: PanelDiagnostic | nul
           </ol>
         </div>
       )}
-      <p className="mt-3 text-[13px] font-medium text-[var(--dim)]">
+      <p className="mt-3 text-sm font-semibold text-[var(--dim)]">
         Teste feito em {new Date(diagnostic.testedAt).toLocaleString("pt-BR")}. Este teste só autentica: ele não renova cliente e não consome crédito.
       </p>
     </div>
@@ -3403,7 +3427,7 @@ function ServersTab({ data }: { data: State }) {
                 <div className="rounded-xl bg-[var(--surface2)] p-3">
                   <p className="text-xs font-bold uppercase tracking-wide text-[var(--dim)]">Custo/créd.</p>
                   <p className="mt-0.5 font-display text-2xl font-extrabold">{brl(s.costPerCreditCents)}</p>
-                  {s.chargeByScreens && <p className="text-[13px] font-medium text-[var(--dim)]">cobrança por telas</p>}
+                  {s.chargeByScreens && <p className="text-sm font-semibold text-[var(--dim)]">cobrança por telas</p>}
                 </div>
               </div>
 
@@ -4907,7 +4931,7 @@ function WhatsAppTab({ data }: { data: State }) {
                 )}
               </div>
             </div>
-            <p className="text-[13px] font-medium text-[var(--dim)]">
+            <p className="text-sm font-semibold text-[var(--dim)]">
               Preferências salvas neste gestor para o dispositivo conectado.
               {prefsMsg ? ` ${prefsMsg}` : ""}
             </p>
@@ -5052,7 +5076,7 @@ function MessagesTab({ data }: { data: State }) {
         <h2 className="font-display text-xl font-bold">Mensagens do WhatsApp</h2>
         <p className="mt-1 text-sm text-[var(--dim)]">
           Modelos editáveis para vencimento próximo, conta renovada, conta
-          expirada e cobrança. Use {"{nome}"}, {"{usuario}"}, {"{telefone}"}, {"{vencimento}"}, {"{novo_vencimento}"}, {"{dias}"}, {"{dias_vencido}"}, {"{valor}"}, {"{plano}"} e {"{link}"} — o {"{link}"} é o endereço completo da fatura daquele cliente, para ele tocar, abrir a fatura e copiar a chave Pix lá dentro. Os modelos de aviso, expirada e cobrança são os mesmos do botão “Enviar mensagem” na lista de clientes.
+          expirada e cobrança. Use {"{saudacao}"} (Bom dia, Boa tarde ou Boa noite conforme a hora de São Paulo), {"{nome}"}, {"{usuario}"}, {"{telefone}"}, {"{vencimento}"}, {"{novo_vencimento}"}, {"{dias}"}, {"{dias_vencido}"}, {"{valor}"}, {"{plano}"} e {"{link}"} — o {"{link}"} é o endereço completo da fatura daquele cliente, para ele tocar, abrir a fatura e copiar a chave Pix lá dentro. Os modelos de aviso, expirada e cobrança são os mesmos do botão “Enviar mensagem” na lista de clientes.
         </p>
       </div>
 
@@ -5127,6 +5151,7 @@ function MessagesTab({ data }: { data: State }) {
             const newExpiry = c.planDays != null ? todayPlusDays(c.planDays) : c.expiresAt;
             const rendered = renderMsg(template, {
               nome: c.name,
+              saudacao: greetingNow(),
               usuario: c.iptvUser,
               vencimento: fmtDate(c.expiresAt),
               novoVencimento: fmtDate(newExpiry),
@@ -5623,7 +5648,7 @@ function DashboardTab({
             {card.value != null && (
               <span className="mt-1.5 block text-sm font-semibold text-[var(--text)]">{money(card.value)}</span>
             )}
-            <span className="mt-0.5 block text-[13px] font-medium text-[var(--dim)]">{card.hint}</span>
+            <span className="mt-0.5 block text-sm font-semibold text-[var(--dim)]">{card.hint}</span>
           </button>
         ))}
       </div>
@@ -5710,6 +5735,7 @@ function DashboardTab({
                                 withInvoiceLink(
                                   renderMsg(warnTemplateFor(daysLeft(c.expiresAt), data), {
                                     nome: c.name,
+                                    saudacao: greetingNow(),
                                     usuario: c.iptvUser,
                                     vencimento: fmtDate(c.expiresAt),
                                     dias: c.planDays,
@@ -6407,7 +6433,7 @@ function ReferralsTab({
                 <p className="min-w-0 flex-1 font-semibold">
                   {name}
                   {!clientNames.has(name.toLowerCase()) && (
-                    <span className="ml-2 text-xs font-medium text-[var(--dim)]">(não é cliente cadastrado)</span>
+                    <span className="ml-2 text-sm font-semibold text-[var(--dim)]">(não é cliente cadastrado)</span>
                   )}
                 </p>
                 <span className="rounded-full bg-[var(--surface)] px-3 py-1 text-sm font-bold">
@@ -7013,7 +7039,7 @@ function HostingSection({ data }: { data: State }) {
           inputMode="url"
           autoComplete="off"
         />
-        <p className="mt-1 text-[13px] font-medium text-[var(--dim)]">
+        <p className="mt-1 text-sm font-semibold text-[var(--dim)]">
           É o endereço que o Render mostra na página do seu serviço (termina em .onrender.com). Salvando aqui,
           todos os links de fatura — no botão Fatura, em Enviar mensagem e nas mensagens da aba Mensagens —
           passam a usar este endereço na hora.
@@ -7107,7 +7133,7 @@ function HostingSection({ data }: { data: State }) {
             </button>
           </details>
         ))}
-        <p className="text-[13px] font-medium text-[var(--dim)]">
+        <p className="text-sm font-semibold text-[var(--dim)]">
           Estes mesmos arquivos acompanham esta versão do gestor: render.yaml, Dockerfile, .env.example e o guia
           HOSPEDAGEM-RENDER.md estão na raiz do projeto e também na pasta hospedagem-render. Eles não contêm
           nenhum segredo: os valores reais das variáveis ficam só no painel do Render.
