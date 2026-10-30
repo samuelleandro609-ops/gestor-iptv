@@ -834,13 +834,31 @@ function panelResponseFailureMessage(raw: string): string | null {
   }
 }
 
+// Um item da listagem do painel é de teste quando o campo de trial
+// vem marcado — a API responde is_trial (snake) em /lines e isTrial
+// (camel) na ativação; aceita os dois, número 1 ou booleano true.
+function panelItemIsTrial(item: Record<string, unknown>): boolean {
+  const raw = item.is_trial ?? item.isTrial;
+  return raw === 1 || raw === true;
+}
+
+function panelItemFiniteNumber(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && /^\d+$/.test(raw.trim())) return Number(raw.trim());
+  return null;
+}
+
+function panelItemNonEmptyString(raw: unknown): string | null {
+  return typeof raw === "string" && raw.trim() !== "" ? raw.trim() : null;
+}
+
 // Executa a extensão REAL do usuário exato na API do painel — o
 // equivalente ao botão [+] Estender da lista de usuários. Usa o
 // caminho/método/corpo editáveis salvos no servidor. Retorna sucesso
 // somente com HTTP 2xx; qualquer outra resposta é falha, sem fingir.
 async function panelExtendUser(
   server: typeof schema.servers.$inferSelect,
-  args: { iptvUser: string; iptvPass: string; days: number },
+  args: { iptvUser: string; iptvPass: string; days: number; whatsapp?: string },
   topsul?: TopsulCreds | null,
 ): Promise<{ ok: boolean; detail: string }> {
   // TopSul: a renovação usa o endpoint renew_client com o token e o
@@ -882,6 +900,11 @@ async function panelExtendUser(
   // (a API respondeu 400 "days must be one of the following values:
   // 15" para {"days":30}); planos de 30/60/90 dias vão como meses
   // (1 crédito = 30 dias = 1 mês). Só 15 dias vai como {"days":15}.
+  // 2b) Usuário de teste vai por PATCH /lines/v2/active/{id} com os
+  // dados do próprio cadastro dele no painel (a ativação já aplica o
+  // período e o converte em cliente ativo); se a extensão responder
+  // que o usuário está em teste, a ativação é tentada uma vez como
+  // reserva, com o mesmo item encontrado.
   // Servidores salvos com o caminho antigo "/users/extend" (um
   // palpite que a API respondeu 404) usam a rota documentada sem a
   // dona precisar redigitar nada; caminho/método/corpo diferentes
@@ -914,6 +937,7 @@ async function panelExtendUser(
   const effBodyTpl = isLegacyBody ? defaultBodyTpl : storedBody;
   let panelId = "";
   let foundInTrials = false;
+  let matchedItem: Record<string, unknown> | null = null;
   try {
     const wanted = args.iptvUser.trim();
     const wantedLower = wanted.toLowerCase();
@@ -980,6 +1004,7 @@ async function panelExtendUser(
       const exact = passItems.find((it) => it.username === wanted && hasUsableId(it));
       if (exact) {
         panelId = String(exact.id);
+        matchedItem = exact;
         foundInTrials = isTrialPass;
         found = true;
         break;
@@ -991,7 +1016,9 @@ async function panelExtendUser(
         }
       }
       if (ciById.size === 1) {
-        panelId = String([...ciById.values()][0]!.id);
+        const ciMatch = [...ciById.values()][0]!;
+        panelId = String(ciMatch.id);
+        matchedItem = ciMatch;
         foundInTrials = isTrialPass;
         found = true;
         break;
@@ -1010,6 +1037,83 @@ async function panelExtendUser(
       ok: false,
       detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: ${sanitizePanelResponseBody(message, [server.apiToken, args.iptvPass], 300)}. Nada foi renovado no painel e nenhum crédito foi consumido.`,
     };
+  }
+  // Usuário de teste: a API de extensão recusa ("realize a ativação
+  // primeiro") — o caminho é PATCH /lines/v2/active/{id}, que já
+  // aplica o período e converte o teste em cliente ativo; nenhuma
+  // chamada de extensão separada é necessária depois. O corpo é
+  // montado com os dados do próprio cadastro dele no painel.
+  const matchedIsTrial = matchedItem != null && (panelItemIsTrial(matchedItem) || foundInTrials);
+  const activateTrialUser = async (): Promise<{ ok: boolean; detail: string }> => {
+    const item = matchedItem;
+    if (!item) {
+      return {
+        ok: false,
+        detail: `O usuário ${args.iptvUser} não foi localizado no painel para ativar. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+      };
+    }
+    const planId = panelItemFiniteNumber(
+      item.planId ?? (item.plan && typeof item.plan === "object" ? (item.plan as Record<string, unknown>).id : undefined),
+    );
+    if (planId == null) {
+      return {
+        ok: false,
+        detail: `O usuário ${args.iptvUser} está em período de teste no painel, mas o cadastro dele no painel não traz um plano para ativar. Nada foi renovado no painel e nenhum crédito foi consumido. Confira o plano do usuário no painel.`,
+      };
+    }
+    const body: Record<string, unknown> = {};
+    if (args.days === 15) body.days = 15;
+    else body.months = meses;
+    body.planId = planId;
+    const packageIptv = panelItemFiniteNumber(item.package_iptv ?? item.packageIptv);
+    if (packageIptv != null) body.package_iptv = packageIptv;
+    const packageP2p = panelItemNonEmptyString(item.package_p2p ?? item.packageP2p);
+    if (packageP2p != null) body.package_p2p = packageP2p;
+    body.access_iptv = panelItemFiniteNumber(item.access_iptv ?? item.max_connections) ?? 1;
+    body.access_nexus = panelItemFiniteNumber(item.access_nexus) ?? 0;
+    body.country = panelItemNonEmptyString(item.country) ?? "Brasil";
+    const whatsapp = panelItemNonEmptyString(item.whatsapp) ?? panelItemNonEmptyString(args.whatsapp);
+    if (whatsapp != null) body.whatsapp = whatsapp;
+    try {
+      const res = await fetch(`${base}/lines/v2/active/${encodeURIComponent(panelId)}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${server.apiToken}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20000),
+      });
+      const rawBody = await res.text().catch(() => "");
+      const shownBody = sanitizePanelResponseBody(rawBody, [server.apiToken, args.iptvPass], 500);
+      const failureMessage = panelResponseFailureMessage(rawBody);
+      if (res.ok && !failureMessage) {
+        let expDate = "";
+        try {
+          const parsed = JSON.parse(rawBody) as Record<string, unknown>;
+          const expRaw = parsed?.expDate ?? parsed?.exp_date;
+          if (typeof expRaw === "string") expDate = expRaw;
+        } catch {}
+        const sentText = args.days === 15 ? "15 dias" : `${meses} ${meses === 1 ? "mês" : "meses"}`;
+        return {
+          ok: true,
+          detail: `A API do painel ATIVOU o usuário de teste ${args.iptvUser} (HTTP ${res.status}) por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}); período aplicado na ativação: ${sentText}. Nenhuma extensão separada foi necessária.${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
+        };
+      }
+      return {
+        ok: false,
+        detail: `A API do painel não concluiu a ativação do usuário de teste ${args.iptvUser}: HTTP ${res.status}${failureMessage ? ` — ${failureMessage}` : ""}. ${shownBody ? `Resposta da API: ${shownBody}. ` : ""}Nada foi dado como renovado.`,
+      };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      return {
+        ok: false,
+        detail: `Não foi possível alcançar a API do painel para ativar o usuário de teste ${args.iptvUser}: ${sanitizePanelResponseBody(message, [server.apiToken, args.iptvPass], 300)}. Nada foi dado como renovado.`,
+      };
+    }
+  };
+  if (matchedIsTrial) {
+    return await activateTrialUser();
   }
   const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits, id: panelId, meses };
   const path = renderExtendTemplate(effPath, vars);
@@ -1040,6 +1144,14 @@ async function panelExtendUser(
         ok: true,
         detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}); enviado ao painel: ${sentText}.${roundedMonths ? ` Duração arredondada de ${args.days} dias para ${meses} ${meses === 1 ? "mês" : "meses"}.` : ""}${foundInTrials ? " Usuário encontrado entre os testes do painel; a extensão deve movê-lo para usuário normal." : ""}${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
       };
+    }
+    // Reserva: a API pode dizer que o usuário ainda está em teste
+    // mesmo sem o item vir marcado como trial — tenta a ativação
+    // UMA vez com o mesmo item encontrado e devolve o resultado
+    // dela, sem repetir a extensão.
+    const trialHint = /per[ií]odo de teste|trial|ativa[cç][aã]o/i.test(`${failureMessage ?? ""} ${rawBody}`);
+    if (res.status === 400 && trialHint) {
+      return await activateTrialUser();
     }
     return {
       ok: false,
@@ -2147,6 +2259,7 @@ async function panelExtendForClient(
         iptvUser: client.iptvUser,
         iptvPass: client.iptvPass,
         days,
+        whatsapp: client.whatsapp ?? undefined,
       });
       return { panelServer: own, extend };
     }
@@ -2183,6 +2296,7 @@ async function panelExtendForClient(
       iptvUser: client.iptvUser,
       iptvPass: client.iptvPass,
       days,
+      whatsapp: client.whatsapp ?? undefined,
     });
     return { panelServer: own, extend };
   }
@@ -2217,6 +2331,7 @@ async function panelExtendForClient(
     iptvUser: client.iptvUser,
     iptvPass: client.iptvPass,
     days,
+    whatsapp: client.whatsapp ?? undefined,
   }, fallbackCreds);
   return { panelServer, extend };
 }
@@ -3997,6 +4112,7 @@ export const Actions = {
         iptvUser: client.iptvUser,
         iptvPass: client.iptvPass,
         days: plan.days,
+        whatsapp: client.whatsapp ?? undefined,
       }, topsulCreds);
       if (!result.ok) {
         await db
