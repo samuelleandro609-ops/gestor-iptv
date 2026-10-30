@@ -1,14 +1,21 @@
+import { randomInt } from "node:crypto";
 import { z } from "zod";
 import QRCode from "qrcode";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
-import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const okResponse = z.object({ ok: z.literal(true) });
 
 function creditsForDays(days: number): number {
   return Math.round(days / 30);
+}
+
+// Arredonda para 2 casas decimais: todos os saldos/movimentações de
+// crédito passam por aqui, para 4,53 - 1 nunca virar 3,5299999.
+function round2(x: number): number {
+  return Math.round(x * 100) / 100;
 }
 
 function fmtBRL(cents: number): string {
@@ -193,6 +200,8 @@ const DEFAULTS = {
   resendApiKey: "",
   resendFrom: "",
   defaultSubPriceCents: 0,
+  // Dias concedidos a quem indicou uma conta que pagou a assinatura.
+  referralRewardDays: 30,
 };
 
 type SettingsObj = typeof DEFAULTS;
@@ -245,6 +254,7 @@ async function loadSettings(ctx: Ctx, ownerId: number): Promise<SettingsObj> {
     resendApiKey: row.resendApiKey ?? "",
     resendFrom: row.resendFrom ?? "",
     defaultSubPriceCents: row.defaultSubPriceCents ?? 0,
+    referralRewardDays: row.referralRewardDays ?? 30,
   };
 }
 
@@ -283,6 +293,7 @@ async function persistSettings(
     resendApiKey: string;
     resendFrom: string;
     defaultSubPriceCents: number;
+    referralRewardDays: number;
   }>,
 ) {
   const db = ctx.db<typeof schema>();
@@ -626,6 +637,101 @@ function escapeHtml(text: string): string {
     .replaceAll('"', "&quot;");
 }
 
+// ---------------- Indicação de contas ----------------
+// Código de indicação: 8 caracteres sem letras/números ambíguos
+// (sem I, L, O, 0, 1), gerado com aleatoriedade criptográfica. O link
+// é montado na tela (base pública + "#/cadastro?ref=" + código).
+const REFERRAL_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+function generateReferralCode(): string {
+  let out = "";
+  for (let i = 0; i < 8; i++) out += REFERRAL_ALPHABET[randomInt(REFERRAL_ALPHABET.length)];
+  return out;
+}
+
+// Garante que a conta tem um código: se já tem, devolve o dela; se
+// não tem, gera e grava (até 5 tentativas em caso de colisão no
+// índice único — a gravação só acontece quando o campo ainda está
+// vazio, então nunca sobrescreve o código de outra chamada).
+async function ensureReferralCode(ctx: Ctx, accountId: number): Promise<string | null> {
+  const db = ctx.db<typeof schema>();
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const rows = await db
+      .select()
+      .from(schema.accounts)
+      .where(eq(schema.accounts.id, accountId));
+    const row = rows[0];
+    if (!row) return null;
+    if (row.referralCode) return row.referralCode;
+    const code = generateReferralCode();
+    try {
+      const updated = await db
+        .update(schema.accounts)
+        .set({ referralCode: code })
+        .where(and(eq(schema.accounts.id, accountId), isNull(schema.accounts.referralCode)))
+        .returning({ referralCode: schema.accounts.referralCode });
+      if (updated[0]?.referralCode) return updated[0].referralCode;
+    } catch {
+      // Colisão no índice único (outra conta pegou o mesmo código):
+      // a próxima tentativa gera outro e relê o código já gravado.
+    }
+  }
+  const rows = await db
+    .select()
+    .from(schema.accounts)
+    .where(eq(schema.accounts.id, accountId));
+  return rows[0]?.referralCode ?? null;
+}
+
+// Concede a recompensa de indicação quando uma conta indicada PAGA a
+// assinatura. Melhor esforço e idempotente: qualquer falha aqui NUNCA
+// desfaz a aprovação da assinatura (quem chama já aprovou); a
+// unicidade por conta indicada impede conceder duas vezes. Só vale
+// para pagamento real aprovado — nunca para registro, teste grátis,
+// modo de validação ou liberação manual pela administradora (esses
+// caminhos não passam por applySubscriptionApproval).
+async function grantReferralReward(
+  ctx: Ctx,
+  referredAccountId: number,
+  subscriptionPaymentId: number,
+): Promise<void> {
+  try {
+    const db = ctx.db<typeof schema>();
+    const referred = await loadAccountRow(ctx, referredAccountId);
+    if (!referred?.referredByAccountId) return;
+    if (referred.referredByAccountId === referredAccountId) return;
+    const referrer = await loadAccountRow(ctx, referred.referredByAccountId);
+    if (!referrer) return;
+    if (isAdminAccount(referrer)) return;
+    if (referrer.subStatus === "blocked") return;
+    const existing = await db
+      .select()
+      .from(schema.referralRewards)
+      .where(eq(schema.referralRewards.referredAccountId, referredAccountId));
+    if (existing.length > 0) return;
+    const { settings } = await loadAdminSettings(ctx);
+    const days = settings.referralRewardDays ?? 30;
+    if (!(days > 0)) return;
+    const nowMs = Date.now();
+    const baseMs = Math.max(nowMs, referrer.subExpiresAt ? referrer.subExpiresAt.getTime() : 0);
+    const expiresAt = new Date(baseMs + days * 24 * 60 * 60 * 1000);
+    await db
+      .update(schema.accounts)
+      .set({ subExpiresAt: expiresAt, subStatus: "active" })
+      .where(eq(schema.accounts.id, referrer.id));
+    await db.insert(schema.referralRewards).values({
+      referrerAccountId: referrer.id,
+      referredAccountId,
+      subscriptionPaymentId,
+      daysGranted: days,
+      grantedAt: new Date(nowMs),
+    });
+  } catch {
+    // Recompensa é melhor esforço: a aprovação da assinatura já
+    // aconteceu e continua valendo mesmo se a concessão falhar.
+  }
+}
+
 // Pagamento da assinatura aprovado: libera APENAS 30 dias, contados
 // do fim do período atual (se ainda válido) ou de agora. Idempotente
 // por cobrança: só aplica uma vez (status 'aprovado' + paidAt).
@@ -647,6 +753,8 @@ async function applySubscriptionApproval(
     .update(schema.accounts)
     .set({ subExpiresAt: expiresAt, subStatus: "active" })
     .where(eq(schema.accounts.id, accountId));
+  // Recompensa de indicação (melhor esforço, nunca quebra a aprovação).
+  await grantReferralReward(ctx, accountId, subscriptionPaymentId);
   return expiresAt;
 }
 
@@ -2164,13 +2272,17 @@ async function applyRenewal(
         server.chargeByScreens === 1 && client.screens != null && client.screens > 0
           ? client.screens
           : 1;
-      const consumed = credits * multiplier;
+      // Consumo decimal: 30 dias = 1 crédito, 60 = 2, 15 = 0,5 —
+      // multiplicado pelas telas quando o servidor cobra por telas.
+      // O campo `credits` da renovação continua inteiro (dias/30
+      // arredondado), como sempre foi; só o SALDO é decimal.
+      const consumed = round2((plan.days / 30) * multiplier);
       if (consumed > 0) {
-        const newBalance = Math.max(0, (server.creditsBalance ?? 0) - consumed);
-        const realDelta = newBalance - (server.creditsBalance ?? 0);
+        const newBalance = round2(Math.max(0, (server.creditsBalance ?? 0) - consumed));
+        const realDelta = round2(newBalance - (server.creditsBalance ?? 0));
         await db
           .update(schema.servers)
-          .set({ creditsBalance: newBalance })
+          .set({ creditsBalance: newBalance, creditsBalanceUpdatedAt: new Date() })
           .where(eq(schema.servers.id, server.id));
         if (realDelta !== 0) {
           await db.insert(schema.serverCreditLogs).values({
@@ -2820,6 +2932,7 @@ const stateResponse = z.object({
       identifier: z.string(),
       initialCredits: z.number(),
       creditsBalance: z.number(),
+      creditsBalanceUpdatedAt: z.string().nullable(),
       costPerCreditCents: z.number(),
       chargeByScreens: z.boolean(),
       notes: z.string(),
@@ -3011,8 +3124,33 @@ const stateResponse = z.object({
       defaultSubPriceCents: z.number(),
       resendFrom: z.string(),
       hasResendKey: z.boolean(),
+      referralRewardDays: z.number(),
     })
     .nullable(),
+  // Indicação de contas: código/link próprio, contagens e recompensas
+  // já concedidas. Nunca traz senha nem hash.
+  referral: z.object({
+    code: z.string().nullable(),
+    rewardDays: z.number(),
+    registeredCount: z.number(),
+    subscribedCount: z.number(),
+    daysEarned: z.number(),
+    rewards: z.array(
+      z.object({
+        referredEmail: z.string(),
+        daysGranted: z.number(),
+        grantedAt: z.string(),
+      }),
+    ),
+    allRewards: z.array(
+      z.object({
+        referrerEmail: z.string(),
+        referredEmail: z.string(),
+        daysGranted: z.number(),
+        grantedAt: z.string(),
+      }),
+    ),
+  }),
 });
 
 // ---------------- Backup e restauração: formato e validação ----------------
@@ -3033,7 +3171,8 @@ const BACKUP_MAX_BYTES = 10_000_000;
 
 const BACKUP_DATE_FIELDS: Record<string, string[]> = {
   account: ["createdAt", "trialEndsAt", "subExpiresAt", "lastLoginAt"],
-  servers: ["createdAt"],
+  servers: ["createdAt", "creditsBalanceUpdatedAt"],
+  referralRewards: ["grantedAt"],
   integrations: ["createdAt"],
   serverCreditLogs: ["createdAt"],
   plans: ["createdAt"],
@@ -3047,8 +3186,8 @@ const BACKUP_DATE_FIELDS: Record<string, string[]> = {
 };
 
 const BACKUP_COLUMNS: Record<string, string[]> = {
-  account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt"],
-  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "browserLocateDiagnostic", "identifier", "initialCredits", "creditsBalance", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
+  account: ["email", "passHash", "role", "trialEndsAt", "subExpiresAt", "subPriceCents", "subStatus", "lastLoginAt", "createdAt", "referralCode", "referredByAccountId"],
+  servers: ["name", "panelUrl", "panelUser", "panelPass", "apiBase", "apiToken", "apiVerified", "apiStatusDetail", "apiDiagnostic", "extendPath", "extendMethod", "extendBody", "extendVerified", "extendStatusDetail", "panelConnected", "panelConnectionDetail", "panelConnectionTestedAt", "browserLocateFound", "browserLocateDetail", "browserLocateTestedAt", "browserLocateDiagnostic", "identifier", "initialCredits", "creditsBalance", "creditsBalanceUpdatedAt", "costPerCreditCents", "chargeByScreens", "notes", "active", "panelProvider", "integrationMode", "integrationServerId", "panelIntegrationId", "autoRenewEnabled", "sendVia", "appName", "appDownloadUrl", "downloaderCode", "serverUrl", "serverUrlBackup", "epgUrl", "pixEnabled", "pixInstructions", "createdAt"],
   integrations: ["provider", "name", "url", "panelUser", "panelPass", "apiBase", "apiToken", "apiSecret", "status", "testDetail", "testedAt", "panelInfo", "syncDetail", "syncedAt", "createdAt"],
   serverCreditLogs: ["serverId", "delta", "balanceAfter", "note", "createdAt"],
   plans: ["name", "days", "priceCents", "createdAt"],
@@ -3057,7 +3196,8 @@ const BACKUP_COLUMNS: Record<string, string[]> = {
   payments: ["clientId", "clientName", "amountCents", "days", "credits", "mode", "status", "mpPaymentId", "pixCode", "couponCode", "discountCents", "detail", "wouldExpireAt", "appliedRenewalId", "createdAt", "updatedAt"],
   expenses: ["description", "amountCents", "spentOn", "createdAt"],
   coupons: ["code", "percentOff", "active", "createdAt"],
-  settings: ["warnDays", "mpAccessToken", "mpPublicKey", "mpVerified", "mpAccountLabel", "mpPayerEmail", "mpEnvironment", "liveMode", "renewedMessage", "expiredMessage", "chargeMessage", "whatsappStatus", "whatsappPhone", "waQrStatus", "waQrPhone", "waQrDetail", "waQrImage", "waQrUpdatedAt", "waBlockCalls", "waTranscribeAudio", "waAwayEnabled", "waAwayMessage", "publicBaseUrl", "invoiceTitle", "invoiceMessage", "invoiceColor", "warnMessage", "warnSoonMessage", "resendApiKey", "resendFrom", "defaultSubPriceCents"],
+  settings: ["warnDays", "mpAccessToken", "mpPublicKey", "mpVerified", "mpAccountLabel", "mpPayerEmail", "mpEnvironment", "liveMode", "renewedMessage", "expiredMessage", "chargeMessage", "whatsappStatus", "whatsappPhone", "waQrStatus", "waQrPhone", "waQrDetail", "waQrImage", "waQrUpdatedAt", "waBlockCalls", "waTranscribeAudio", "waAwayEnabled", "waAwayMessage", "publicBaseUrl", "invoiceTitle", "invoiceMessage", "invoiceColor", "warnMessage", "warnSoonMessage", "resendApiKey", "resendFrom", "defaultSubPriceCents", "referralRewardDays"],
+  referralRewards: ["referrerAccountId", "referredAccountId", "subscriptionPaymentId", "daysGranted", "grantedAt"],
   subscriptionPayments: ["mpPaymentId", "amountCents", "status", "createdAt", "paidAt"],
 };
 
@@ -3447,6 +3587,48 @@ export const Actions = {
             daysLeft: 0,
           };
       let tenants: z.infer<typeof stateResponse>["tenants"] = [];
+      // Indicação de contas: garante o código na primeira leitura e
+      // monta contagens/recompensas a partir das tabelas (sem expor
+      // senha/hash). A administradora vê também todas as recompensas.
+      const referralCode = await ensureReferralCode(ctx, ownerId);
+      const referredRows = await db
+        .select()
+        .from(schema.accounts)
+        .where(eq(schema.accounts.referredByAccountId, ownerId));
+      const myRewards = await db
+        .select()
+        .from(schema.referralRewards)
+        .where(eq(schema.referralRewards.referrerAccountId, ownerId))
+        .orderBy(desc(schema.referralRewards.grantedAt), desc(schema.referralRewards.id))
+        .limit(50);
+      const accountEmailById = new Map<number, string>();
+      for (const a of await db.select().from(schema.accounts)) accountEmailById.set(a.id, a.email);
+      const referral = {
+        code: referralCode,
+        rewardDays: adminSettingsObj.referralRewardDays ?? 30,
+        registeredCount: referredRows.length,
+        subscribedCount: new Set(myRewards.map((r) => r.referredAccountId)).size,
+        daysEarned: myRewards.reduce((sum, r) => sum + r.daysGranted, 0),
+        rewards: myRewards.map((r) => ({
+          referredEmail: accountEmailById.get(r.referredAccountId) ?? "",
+          daysGranted: r.daysGranted,
+          grantedAt: r.grantedAt.toISOString(),
+        })),
+        allRewards: [] as Array<{ referrerEmail: string; referredEmail: string; daysGranted: number; grantedAt: string }>,
+      };
+      if (access.isAdmin) {
+        const all = await db
+          .select()
+          .from(schema.referralRewards)
+          .orderBy(desc(schema.referralRewards.grantedAt), desc(schema.referralRewards.id))
+          .limit(50);
+        referral.allRewards = all.map((r) => ({
+          referrerEmail: accountEmailById.get(r.referrerAccountId) ?? "",
+          referredEmail: accountEmailById.get(r.referredAccountId) ?? "",
+          daysGranted: r.daysGranted,
+          grantedAt: r.grantedAt.toISOString(),
+        }));
+      }
       if (access.isAdmin) {
         const allAccounts = await db.select().from(schema.accounts).orderBy(asc(schema.accounts.id));
         const [clientCounts, serverCounts, planCounts] = await Promise.all([
@@ -3509,6 +3691,7 @@ export const Actions = {
           identifier: x.identifier ?? "",
           initialCredits: x.initialCredits ?? 0,
           creditsBalance: x.creditsBalance ?? 0,
+          creditsBalanceUpdatedAt: x.creditsBalanceUpdatedAt ? x.creditsBalanceUpdatedAt.toISOString() : null,
           costPerCreditCents: x.costPerCreditCents ?? 0,
           chargeByScreens: x.chargeByScreens === 1,
           notes: x.notes ?? "",
@@ -3691,8 +3874,10 @@ export const Actions = {
               defaultSubPriceCents: adminSettingsObj.defaultSubPriceCents,
               resendFrom: adminSettingsObj.resendFrom,
               hasResendKey: adminSettingsObj.resendApiKey.length > 0,
+              referralRewardDays: adminSettingsObj.referralRewardDays ?? 30,
             }
           : null,
+        referral,
       };
     },
   }),
@@ -3875,6 +4060,9 @@ export const Actions = {
       extendBody: z.string().max(2000).optional(),
       identifier: z.string().max(60).optional(),
       initialCredits: z.number().int().min(0).max(1000000).optional(),
+      // Ajuste manual do saldo na edição (decimal): na criação é
+      // ignorado — o saldo nasce com initialCredits, como hoje.
+      creditsBalance: z.number().min(0).max(1000000).optional(),
       costPerCreditCents: z.number().int().min(0).max(100000000).optional(),
       chargeByScreens: z.boolean().optional(),
       notes: z.string().max(1000).optional(),
@@ -4026,6 +4214,16 @@ export const Actions = {
       };
 
       if (existing) {
+        // Ajuste manual do saldo (só na edição, só quando muda):
+        // o valor informado passa a ser o saldo, com carimbo de
+        // atualização e movimentação no controle detalhado.
+        const manualBalance =
+          args.creditsBalance !== undefined ? round2(args.creditsBalance) : null;
+        const oldBalance = round2(existing.creditsBalance ?? 0);
+        const balanceChanged = manualBalance != null && manualBalance !== oldBalance;
+        const balancePatch = balanceChanged
+          ? { creditsBalance: manualBalance, creditsBalanceUpdatedAt: new Date() }
+          : {};
         const apiChanged = token !== existing.apiToken || apiBase !== existing.apiBase;
         const extendChanged =
           extendPath !== existing.extendPath ||
@@ -4056,9 +4254,19 @@ export const Actions = {
                 ? "Extensão pendente: a configuração da extensão mudou. Um teste de extensão real (que renova e consome crédito) precisa passar para voltar a valer."
                 : existing.extendStatusDetail,
             ...extra,
+            ...balancePatch,
             ...connectionFields,
           })
           .where(eq(schema.servers.id, existing.id));
+        if (balanceChanged && manualBalance != null) {
+          await db.insert(schema.serverCreditLogs).values({
+            ownerId,
+            serverId: existing.id,
+            delta: round2(manualBalance - oldBalance),
+            balanceAfter: manualBalance,
+            note: "Ajuste manual do saldo de créditos",
+          });
+        }
         ctx.invalidateQueries();
         return { id: existing.id, connected: connection.connected, connectionDetail: connection.detail };
       }
@@ -4084,6 +4292,7 @@ export const Actions = {
           extendStatusDetail: "",
           initialCredits,
           creditsBalance: initialCredits,
+          creditsBalanceUpdatedAt: new Date(),
           ...extra,
           ...connectionFields,
         })
@@ -4105,12 +4314,13 @@ export const Actions = {
   }),
 
   // Recarga de créditos de um servidor: soma ao saldo atual e registra
-  // a movimentação no controle detalhado de créditos.
+  // a movimentação no controle detalhado de créditos. Aceita frações
+  // (ex.: 2,5 créditos), arredondadas para 2 casas decimais.
   addServerCredits: defineAction({
     request: z.object({
       session: sessionField,
       serverId: z.number().int().positive(),
-      amount: z.number().int().positive().max(1000000),
+      amount: z.number().positive().max(1000000),
       note: z.string().max(300),
     }),
     response: z.object({ creditsBalance: z.number() }),
@@ -4123,15 +4333,16 @@ export const Actions = {
         .where(eq(schema.servers.id, args.serverId));
       const server = rows[0];
       if (!server || server.ownerId !== ownerId) throw new Error("Servidor não encontrado.");
-      const newBalance = (server.creditsBalance ?? 0) + args.amount;
+      const amount = round2(args.amount);
+      const newBalance = round2((server.creditsBalance ?? 0) + amount);
       await db
         .update(schema.servers)
-        .set({ creditsBalance: newBalance })
+        .set({ creditsBalance: newBalance, creditsBalanceUpdatedAt: new Date() })
         .where(eq(schema.servers.id, server.id));
       await db.insert(schema.serverCreditLogs).values({
         ownerId,
         serverId: server.id,
-        delta: args.amount,
+        delta: amount,
         balanceAfter: newBalance,
         note: args.note.trim() || "Recarga de créditos",
       });
@@ -5946,6 +6157,7 @@ export const Actions = {
     request: z.object({
       email: z.string().min(3).max(200),
       password: z.string().min(6).max(200),
+      referralCode: z.string().max(20).optional(),
     }),
     response: z.object({
       token: z.string(),
@@ -5961,6 +6173,19 @@ export const Actions = {
       const existing = await db.select().from(schema.accounts);
       if (existing.some((a) => a.email.toLowerCase() === email)) {
         throw new Error("Já existe uma conta com este e-mail. Toque em Entrar.");
+      }
+      // Link de indicação: código desconhecido ou vazio é IGNORADO
+      // SILENCIOSAMENTE (nunca revela se um código existe). O vínculo
+      // só é gravado depois da conta criada, para nunca apontar a
+      // conta para ela mesma.
+      const refCode = (args.referralCode ?? "").trim().toUpperCase();
+      let referrer: AccountRow | null = null;
+      if (refCode) {
+        const byCode = await db
+          .select()
+          .from(schema.accounts)
+          .where(eq(schema.accounts.referralCode, refCode));
+        referrer = byCode[0] ?? null;
       }
       const isFirstAccount = existing.length === 0;
       const passHash = await hashPassword(args.password);
@@ -5981,6 +6206,14 @@ export const Actions = {
         .returning({ id: schema.accounts.id });
       const account = inserted[0];
       if (!account) throw new Error("Não foi possível criar a conta.");
+      if (referrer && referrer.id !== account.id) {
+        await db
+          .update(schema.accounts)
+          .set({ referredByAccountId: referrer.id })
+          .where(eq(schema.accounts.id, account.id));
+      }
+      // A conta nova já nasce com o próprio código de indicação.
+      await ensureReferralCode(ctx, account.id).catch(() => null);
       // A PRIMEIRA conta criada herda os dados que já existiam no
       // gestor de quando ele era de uma pessoa só (owner_id = 0). Toda
       // conta criada depois começa do zero, vazia.
@@ -6289,6 +6522,25 @@ export const Actions = {
     },
   }),
 
+  // Dias de recompensa por indicação confirmada (só a administradora):
+  // grava nas configurações DELA, que é de onde a concessão lê o
+  // valor na hora de aprovar a assinatura indicada. 0 desliga.
+  saveReferralSettings: defineAction({
+    request: z.object({
+      session: sessionField,
+      referralRewardDays: z.number().int().min(0).max(365),
+    }),
+    response: okResponse,
+    async handler(ctx, args): Promise<z.infer<typeof okResponse>> {
+      const ownerId = await requireAdmin(ctx, args.session);
+      await persistSettings(ctx, ownerId, {
+        referralRewardDays: args.referralRewardDays,
+      });
+      ctx.invalidateQueries();
+      return { ok: true as const };
+    },
+  }),
+
   testEmailSend: defineAction({
     request: z.object({ session: sessionField, to: z.string().max(200).optional() }),
     response: z.object({ ok: z.boolean(), detail: z.string() }),
@@ -6350,7 +6602,7 @@ export const Actions = {
       const db = ctx.db<typeof schema>();
       const accountRow = await loadAccountRow(ctx, adminId);
       if (!accountRow) throw new Error("Conta não encontrada.");
-      const [accounts, servers, integrations, serverCreditLogs, plans, clients, renewals, payments, expenses, coupons, settings, subscriptionPayments] =
+      const [accounts, servers, integrations, serverCreditLogs, plans, clients, renewals, payments, expenses, coupons, settings, subscriptionPayments, referralRewards] =
         await Promise.all([
           db.select().from(schema.accounts).orderBy(asc(schema.accounts.id)),
           db.select().from(schema.servers),
@@ -6364,6 +6616,7 @@ export const Actions = {
           db.select().from(schema.coupons),
           db.select().from(schema.settings),
           db.select().from(schema.subscriptionPayments),
+          db.select().from(schema.referralRewards),
         ]);
       const exportedAt = new Date().toISOString();
       const payload = {
@@ -6384,6 +6637,7 @@ export const Actions = {
           coupons,
           settings,
           subscriptionPayments,
+          referralRewards,
         },
       };
       const counts: Record<string, number> = {
@@ -6399,6 +6653,7 @@ export const Actions = {
         cupons: coupons.length,
         configurações: settings.length,
         pagamentos: subscriptionPayments.length,
+        indicações: referralRewards.length,
       };
       return { backupJson: JSON.stringify(payload), exportedAt, email: accountRow.email, counts };
     },
@@ -6435,6 +6690,7 @@ export const Actions = {
           // restaura (a sessão dela continua valendo) e as sessões
           // dela; sessões de outras contas e links de redefinição
           // de senha são descartados (expiram sozinhos).
+          await tx.delete(schema.referralRewards);
           await tx.delete(schema.subscriptionPayments);
           await tx.delete(schema.payments);
           await tx.delete(schema.renewals);
@@ -6603,11 +6859,38 @@ export const Actions = {
             if (newOwnerId == null) continue;
             await tx.insert(schema.settings).values({ ...rest, ownerId: newOwnerId } as any);
           }
+          const subPaymentIds = new Map<number, number>();
           for (const row of staged.subscriptionPayments) {
             const { __oldId, ...rest } = row as any;
             const newOwnerId = ownerFor(row.__oldOwnerId);
             if (newOwnerId == null) continue;
-            await tx.insert(schema.subscriptionPayments).values({ ...rest, accountId: newOwnerId } as any);
+            const inserted = await tx
+              .insert(schema.subscriptionPayments)
+              .values({ ...rest, accountId: newOwnerId } as any)
+              .returning({ id: schema.subscriptionPayments.id });
+            if (inserted[0]) subPaymentIds.set(__oldId, inserted[0].id);
+          }
+          // Recompensas de indicação: só existem em backups novos
+          // (backups antigos não têm a chave e restauram normalmente).
+          // Linhas com conta ou cobrança desconhecida são puladas.
+          let insertedRewards = 0;
+          const rawRewards = parsed.data.referralRewards;
+          if (Array.isArray(rawRewards)) {
+            for (const rawRow of rawRewards) {
+              const picked = pickBackupRow("referralRewards", rawRow);
+              const referrerId = accountIds.get(Number(picked.referrerAccountId));
+              const referredId = accountIds.get(Number(picked.referredAccountId));
+              const paymentId = subPaymentIds.get(Number(picked.subscriptionPaymentId));
+              if (referrerId == null || referredId == null || paymentId == null) continue;
+              insertedRewards += 1;
+              await tx.insert(schema.referralRewards).values({
+                referrerAccountId: referrerId,
+                referredAccountId: referredId,
+                subscriptionPaymentId: paymentId,
+                daysGranted: Number(picked.daysGranted),
+                grantedAt: picked.grantedAt as Date,
+              } as any);
+            }
           }
           // A conta da administradora já foi atualizada no início
           // (mesmo id, para a sessão dela continuar valendo) e as
@@ -6624,6 +6907,7 @@ export const Actions = {
           counts.cupons = staged.coupons.length;
           counts.configurações = staged.settings.length;
           counts.pagamentos = staged.subscriptionPayments.length;
+          counts.indicações = insertedRewards;
         });
       } catch (err) {
         if (err instanceof Error && err.message.startsWith("Arquivo de backup inválido")) throw err;
