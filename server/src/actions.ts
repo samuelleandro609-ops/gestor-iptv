@@ -656,13 +656,14 @@ async function resolvePanelServer(
 
 function renderExtendTemplate(
   tpl: string,
-  vars: { usuario: string; senha: string; dias: number; creditos: number; id?: string },
+  vars: { usuario: string; senha: string; dias: number; creditos: number; id?: string; meses?: number },
 ): string {
   return tpl
     .replaceAll("{usuario}", vars.usuario)
     .replaceAll("{senha}", vars.senha)
     .replaceAll("{dias}", String(vars.dias))
     .replaceAll("{creditos}", String(vars.creditos))
+    .replaceAll("{meses}", vars.meses != null ? String(vars.meses) : "")
     .replaceAll("{id}", vars.id ?? "");
 }
 
@@ -876,18 +877,41 @@ async function panelExtendUser(
   // usuário errado. A busca é feita em duas passadas (clientes
   // comuns e depois testes, is_trial=1) e varre as páginas, porque
   // a listagem padrão não inclui usuários de teste. 2) PATCH
-  // /lines/v2/extend/{id} com {"days": N}.
+  // /lines/v2/extend/{id} com {"months": N} — a API aceita days OU
+  // months (só um dos dois) e, na prática, days só aceita 15
+  // (a API respondeu 400 "days must be one of the following values:
+  // 15" para {"days":30}); planos de 30/60/90 dias vão como meses
+  // (1 crédito = 30 dias = 1 mês). Só 15 dias vai como {"days":15}.
   // Servidores salvos com o caminho antigo "/users/extend" (um
   // palpite que a API respondeu 404) usam a rota documentada sem a
   // dona precisar redigitar nada; caminho/método/corpo diferentes
-  // desse padrão antigo continuam sendo respeitados, com {id}
-  // disponível nos modelos.
+  // desse padrão antigo continuam sendo respeitados, com {id} e
+  // {meses} disponíveis nos modelos.
   const LEGACY_EXTEND_PATH = "/users/extend";
   const DOCUMENTED_EXTEND_PATH = "/lines/v2/extend/{id}";
   const isLegacyExtend = (server.extendPath || "").trim() === LEGACY_EXTEND_PATH;
   const effPath = isLegacyExtend ? DOCUMENTED_EXTEND_PATH : server.extendPath || DOCUMENTED_EXTEND_PATH;
   const effMethod = isLegacyExtend ? "PATCH" : (server.extendMethod || "POST").toUpperCase();
-  const effBodyTpl = isLegacyExtend ? '{"days":{dias}}' : (server.extendBody ?? "");
+  // Meses a enviar: planos são múltiplos de 30 dias (1 crédito =
+  // 30 dias); 15 dias é o único valor aceito em "days".
+  const meses = Math.max(1, Math.round(args.days / 30));
+  const roundedMonths = args.days !== 15 && args.days % 30 !== 0;
+  const defaultBodyTpl = args.days === 15 ? '{"days":15}' : '{"months":{meses}}';
+  // Corpos-padrão (o original com username/days/credits, o
+  // intermediário {"days":{dias}} e o atual {"months":{meses}}) usam
+  // o corpo calculado da duração (15 dias vai como days, o resto
+  // como meses) sem a dona precisar redigitar nada; corpo
+  // personalizado continua sendo respeitado, com {meses} e {id}
+  // disponíveis. Sem o cálculo, um plano de 15 dias cairia no
+  // padrão em meses e ganharia 30 dias no painel.
+  const DEFAULT_EXTEND_BODIES = new Set([
+    '{"username":"{usuario}","days":{dias},"credits":{creditos}}',
+    '{"days":{dias}}',
+    '{"months":{meses}}',
+  ]);
+  const storedBody = (server.extendBody ?? "").trim();
+  const isLegacyBody = isLegacyExtend || storedBody === "" || DEFAULT_EXTEND_BODIES.has(storedBody);
+  const effBodyTpl = isLegacyBody ? defaultBodyTpl : storedBody;
   let panelId = "";
   let foundInTrials = false;
   try {
@@ -987,7 +1011,7 @@ async function panelExtendUser(
       detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: ${sanitizePanelResponseBody(message, [server.apiToken, args.iptvPass], 300)}. Nada foi renovado no painel e nenhum crédito foi consumido.`,
     };
   }
-  const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits, id: panelId };
+  const vars = { usuario: args.iptvUser, senha: args.iptvPass, dias: args.days, creditos: credits, id: panelId, meses };
   const path = renderExtendTemplate(effPath, vars);
   const url = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? "" : "/"}${path}`;
   const method = effMethod;
@@ -1011,9 +1035,10 @@ async function panelExtendUser(
         const parsed = JSON.parse(rawBody) as Record<string, unknown>;
         if (typeof parsed?.exp_date === "string") expDate = parsed.exp_date;
       } catch {}
+      const sentText = args.days === 15 ? "15 dias" : `${meses} ${meses === 1 ? "mês" : "meses"}`;
       return {
         ok: true,
-        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}).${foundInTrials ? " Usuário encontrado entre os testes do painel; a extensão deve movê-lo para usuário normal." : ""}${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
+        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}); enviado ao painel: ${sentText}.${roundedMonths ? ` Duração arredondada de ${args.days} dias para ${meses} ${meses === 1 ? "mês" : "meses"}.` : ""}${foundInTrials ? " Usuário encontrado entre os testes do painel; a extensão deve movê-lo para usuário normal." : ""}${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
       };
     }
     return {
@@ -3548,7 +3573,7 @@ export const Actions = {
       const extendBody = keep(
         args.extendBody,
         existing?.extendBody,
-        '{"days":{dias}}',
+        '{"months":{meses}}',
       );
       const initialCredits = existing ? 0 : (args.initialCredits ?? 0);
 
