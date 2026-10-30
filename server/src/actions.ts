@@ -873,7 +873,10 @@ async function panelExtendUser(
   // 1) GET /lines?generalSearch={usuário} lista clientes (busca
   // PARCIAL em username/whatsapp/notes) — é preciso escolher o item
   // cujo username é EXATAMENTE o do cliente, para nunca estender o
-  // usuário errado. 2) PATCH /lines/v2/extend/{id} com {"days": N}.
+  // usuário errado. A busca é feita em duas passadas (clientes
+  // comuns e depois testes, is_trial=1) e varre as páginas, porque
+  // a listagem padrão não inclui usuários de teste. 2) PATCH
+  // /lines/v2/extend/{id} com {"days": N}.
   // Servidores salvos com o caminho antigo "/users/extend" (um
   // palpite que a API respondeu 404) usam a rota documentada sem a
   // dona precisar redigitar nada; caminho/método/corpo diferentes
@@ -885,46 +888,98 @@ async function panelExtendUser(
   const effPath = isLegacyExtend ? DOCUMENTED_EXTEND_PATH : server.extendPath || DOCUMENTED_EXTEND_PATH;
   const effMethod = isLegacyExtend ? "PATCH" : (server.extendMethod || "POST").toUpperCase();
   const effBodyTpl = isLegacyExtend ? '{"days":{dias}}' : (server.extendBody ?? "");
-  let panelId: string;
+  let panelId = "";
+  let foundInTrials = false;
   try {
-    const lookupUrl = `${base}/lines?generalSearch=${encodeURIComponent(args.iptvUser)}`;
-    const lookupRes = await fetch(lookupUrl, {
-      headers: { Authorization: `Bearer ${server.apiToken}` },
-      signal: AbortSignal.timeout(20000),
-    });
-    const lookupRaw = await lookupRes.text().catch(() => "");
-    if (!lookupRes.ok) {
-      const shownLookup = sanitizePanelResponseBody(lookupRaw, [server.apiToken, args.iptvPass], 500);
-      const lookupFailure = panelResponseFailureMessage(lookupRaw);
+    const wanted = args.iptvUser.trim();
+    const wantedLower = wanted.toLowerCase();
+    const seenUsernames: string[] = [];
+    let totalSeen = 0;
+    let found = false;
+    // Duas passadas: primeiro clientes comuns (is_trial=0, o padrão
+    // da API), depois usuários de teste (is_trial=1). Um usuário de
+    // teste que paga precisa ser encontrado e estendido do mesmo
+    // jeito — a renovação deve movê-lo para usuário normal. Cada
+    // passada varre as páginas (até 5) e só aceita o username
+    // exatamente igual; como reserva, aceita UM único nome igual
+    // ignorando maiúsculas — dois ou mais é ambíguo e não escolhe.
+    for (const isTrialPass of [false, true]) {
+      let page = 1;
+      let morePages = true;
+      const passItems: Record<string, unknown>[] = [];
+      while (morePages && page <= 5) {
+        const lookupUrl =
+          `${base}/lines?generalSearch=${encodeURIComponent(wanted)}` +
+          `&page=${page}&quantityPerPage=100${isTrialPass ? "&is_trial=1" : ""}`;
+        const lookupRes = await fetch(lookupUrl, {
+          headers: { Authorization: `Bearer ${server.apiToken}` },
+          signal: AbortSignal.timeout(20000),
+        });
+        const lookupRaw = await lookupRes.text().catch(() => "");
+        if (!lookupRes.ok) {
+          const shownLookup = sanitizePanelResponseBody(lookupRaw, [server.apiToken, args.iptvPass], 500);
+          const lookupFailure = panelResponseFailureMessage(lookupRaw);
+          return {
+            ok: false,
+            detail: `Não foi possível localizar o usuário ${wanted} no painel para estender: a busca na API respondeu HTTP ${lookupRes.status}${lookupFailure ? ` — ${lookupFailure}` : ""}. ${shownLookup ? `Resposta da API: ${shownLookup}. ` : ""}Nada foi renovado no painel e nenhum crédito foi consumido.`,
+          };
+        }
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(lookupRaw) as Record<string, unknown>;
+        } catch {
+          parsed = {};
+        }
+        const items = parsed?.items;
+        if (!Array.isArray(items)) {
+          return {
+            ok: false,
+            detail: `Não foi possível localizar o usuário ${wanted} no painel para estender: a busca na API não trouxe uma lista de clientes válida. Nada foi renovado no painel e nenhum crédito foi consumido.`,
+          };
+        }
+        for (const it of items) {
+          if (!it || typeof it !== "object") continue;
+          const rec = it as Record<string, unknown>;
+          passItems.push(rec);
+          totalSeen += 1;
+          if (typeof rec.username === "string" && rec.username && seenUsernames.length < 5 && !seenUsernames.includes(rec.username)) {
+            seenUsernames.push(rec.username);
+          }
+        }
+        const pagesQuantity = typeof parsed?.pagesQuantity === "number" ? parsed.pagesQuantity : null;
+        const actualPage = typeof parsed?.actualPage === "number" ? parsed.actualPage : page;
+        morePages = pagesQuantity != null ? actualPage < pagesQuantity : items.length >= 100;
+        page += 1;
+      }
+      const hasUsableId = (it: Record<string, unknown>): boolean =>
+        (typeof it.id === "string" || typeof it.id === "number") && String(it.id).trim() !== "";
+      const exact = passItems.find((it) => it.username === wanted && hasUsableId(it));
+      if (exact) {
+        panelId = String(exact.id);
+        foundInTrials = isTrialPass;
+        found = true;
+        break;
+      }
+      const ciById = new Map<string, Record<string, unknown>>();
+      for (const it of passItems) {
+        if (typeof it.username === "string" && it.username !== wanted && it.username.toLowerCase() === wantedLower && hasUsableId(it)) {
+          ciById.set(String(it.id), it);
+        }
+      }
+      if (ciById.size === 1) {
+        panelId = String([...ciById.values()][0]!.id);
+        foundInTrials = isTrialPass;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      const similar = seenUsernames.length > 0 ? ` Nomes parecidos encontrados: ${seenUsernames.join(", ")}.` : " Nenhum nome parecido foi retornado.";
       return {
         ok: false,
-        detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: a busca na API respondeu HTTP ${lookupRes.status}${lookupFailure ? ` — ${lookupFailure}` : ""}. ${shownLookup ? `Resposta da API: ${shownLookup}. ` : ""}Nada foi renovado no painel e nenhum crédito foi consumido.`,
+        detail: `O usuário ${wanted} não foi encontrado no painel (busca feita em clientes comuns e em usuários de teste; ${totalSeen} resultado(s) verificado(s)).${similar} Nada foi renovado no painel e nenhum crédito foi consumido. Confira se o usuário IPTV cadastrado no cliente está igual ao do painel.`,
       };
     }
-    let items: unknown;
-    try {
-      const parsed = JSON.parse(lookupRaw) as Record<string, unknown>;
-      items = parsed?.items;
-    } catch {
-      items = undefined;
-    }
-    if (!Array.isArray(items)) {
-      return {
-        ok: false,
-        detail: `Não foi possível localizar o usuário ${args.iptvUser} no painel para estender: a busca na API não trouxe uma lista de clientes válida. Nada foi renovado no painel e nenhum crédito foi consumido.`,
-      };
-    }
-    const exact = items.find(
-      (it): it is Record<string, unknown> =>
-        !!it && typeof it === "object" && (it as Record<string, unknown>).username === args.iptvUser,
-    );
-    if (!exact || (typeof exact.id !== "string" && typeof exact.id !== "number") || String(exact.id).trim() === "") {
-      return {
-        ok: false,
-        detail: `O usuário ${args.iptvUser} não foi encontrado no painel (a busca trouxe só nomes parecidos, nenhum igual). Nada foi renovado no painel e nenhum crédito foi consumido. Confira se o usuário IPTV cadastrado no cliente está igual ao do painel.`,
-      };
-    }
-    panelId = String(exact.id);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return {
@@ -958,7 +1013,7 @@ async function panelExtendUser(
       } catch {}
       return {
         ok: true,
-        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}).${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
+        detail: `A API do painel aceitou a extensão (HTTP ${res.status}) do usuário ${args.iptvUser} por ${args.days} dias (${credits} crédito${credits > 1 ? "s" : ""}).${foundInTrials ? " Usuário encontrado entre os testes do painel; a extensão deve movê-lo para usuário normal." : ""}${expDate ? ` Nova data de expiração no painel: ${expDate}.` : ""}`,
       };
     }
     return {
