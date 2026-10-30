@@ -2,7 +2,7 @@ import { z } from "zod";
 import QRCode from "qrcode";
 import { defineAction, type ActionsModule, type Ctx } from "./sdk-shim";
 import { privileged } from "./privileged";
-import { asc, desc, eq, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ne, sql } from "drizzle-orm";
 import * as schema from "./schema";
 
 const okResponse = z.object({ ok: z.literal(true) });
@@ -381,13 +381,42 @@ const TRIAL_DAYS = 7;
 // Pix EXATO devolvido pelo Mercado Pago. Se a geração falhar, volta
 // null e o código copiável continua valendo — o pagamento nunca
 // quebra por causa do QR.
-async function pixQrDataUrl(pixCode: string | null): Promise<string | null> {
-  if (!pixCode) return null;
+async function pixQrDataUrl(pixCode: string | null): Promise<string | null> {  if (!pixCode) return null;
   try {
     return await QRCode.toDataURL(pixCode, { errorCorrectionLevel: "M", margin: 1, width: 280 });
   } catch {
     return null;
   }
+}
+
+// Formato de resposta de uma cobrança Pix (paymentShape + QR Code):
+// usado tanto na criação quanto na reutilização de um Pix pendente
+// já existente — o cliente vê exatamente o mesmo objeto nos dois
+// casos, sem saber (nem precisar saber) se a cobrança foi criada
+// agora ou reaproveitada.
+async function toPixPaymentResponse(
+  row: typeof schema.payments.$inferSelect,
+  detail: string,
+): Promise<z.infer<typeof paymentShape> & { qrDataUrl: string | null }> {
+  return {
+    id: row.id,
+    clientId: row.clientId,
+    clientName: row.clientName,
+    amountCents: row.amountCents,
+    days: row.days,
+    credits: row.credits,
+    mode: row.mode,
+    status: row.status,
+    mpPaymentId: row.mpPaymentId ?? null,
+    pixCode: row.pixCode ?? null,
+    qrDataUrl: await pixQrDataUrl(row.pixCode ?? null),
+    couponCode: row.couponCode ?? null,
+    discountCents: row.discountCents ?? 0,
+    detail,
+    wouldExpireAt: row.wouldExpireAt ? row.wouldExpireAt.toISOString() : null,
+    appliedRenewalId: row.appliedRenewalId ?? null,
+    createdAt: row.createdAt.toISOString(),
+  };
 }
 
 type AccountRow = typeof schema.accounts.$inferSelect;
@@ -3461,6 +3490,13 @@ export const Actions = {
       serverPixInstructions: z.string(),
       serverAppName: z.string().nullable(),
       serverAppDownloadUrl: z.string().nullable(),
+      // Pix pendente já existente para esta renovação (mesma chave de
+      // reutilização do createPix): a fatura abre mostrando o MESMO
+      // código/QR sem precisar apertar "Gerar Pix" de novo. Null
+      // quando não há nenhum pendente reutilizável.
+      pendingPayment: paymentShape
+        .extend({ qrDataUrl: z.string().nullable() })
+        .nullable(),
     }),
     async handler(ctx, args) {
       const db = ctx.db<typeof schema>();
@@ -3501,6 +3537,7 @@ export const Actions = {
         serverPixInstructions: "",
         serverAppName: null,
         serverAppDownloadUrl: null,
+        pendingPayment: null,
       };
       const client = foundClient;
       if (!client) return base;
@@ -3547,6 +3584,32 @@ export const Actions = {
         planCredits: plan ? creditsForDays(plan.days) : null,
         effectivePriceCents: client.priceOverrideCents ?? plan?.priceCents ?? 0,
         expiresAt: client.expiresAt.toISOString(),
+        // Pix pendente reutilizável desta renovação exata (mesmo valor,
+        // mesmos dias, mesmo modo, com código no Mercado Pago): o mais
+        // recente. Sem plano não há renovação definida — sem pendente.
+        pendingPayment: await (async () => {
+          if (!plan) return null;
+          const invoiceEffectiveMode: "validacao" | "producao" =
+            s.liveMode && s.mpEnvironment === "producao" ? "producao" : "validacao";
+          const pendingRows = await db
+            .select()
+            .from(schema.payments)
+            .where(
+              and(
+                eq(schema.payments.ownerId, client.ownerId),
+                eq(schema.payments.clientId, client.id),
+                eq(schema.payments.amountCents, client.priceOverrideCents ?? plan.priceCents),
+                eq(schema.payments.days, plan.days),
+                eq(schema.payments.mode, invoiceEffectiveMode),
+                eq(schema.payments.status, "pendente"),
+              ),
+            )
+            .orderBy(desc(schema.payments.id))
+            .limit(1);
+          const pendingRow = pendingRows[0];
+          if (!pendingRow || !pendingRow.mpPaymentId || !pendingRow.pixCode) return null;
+          return toPixPaymentResponse(pendingRow, pendingRow.detail);
+        })(),
       };
     },
   }),
@@ -4567,6 +4630,54 @@ export const Actions = {
           ? "producao"
           : "validacao";
 
+      // REUTILIZAÇÃO — uma cobrança pendente aparece UMA vez só: reabrir
+      // a fatura ou apertar "Gerar Pix" de novo NÃO cria outra cobrança
+      // no Mercado Pago nem outra linha pendente em Transações. A chave
+      // de reutilização é a renovação exata (mesma conta, mesmo cliente,
+      // mesmo valor, mesmos dias, mesmo modo). Um cupom ou preço
+      // diferente muda o valor e, corretamente, não reutiliza.
+      // Ordem: um pagamento já aprovado aguardando o painel vem
+      // primeiro (o dinheiro já entrou — a nova tentativa é pela
+      // consulta, nunca por um Pix novo); depois, o Pix pendente com
+      // código utilizável. Linhas "falhou" e "aguardando_configuracao"
+      // não têm Pix usável e NÃO são reutilizadas: gerar de novo
+      // depois delas cria uma cobrança nova, como deve ser. Linhas
+      // "aprovado"/"recusado" também nunca são reutilizadas. As linhas
+      // antigas duplicadas NÃO são apagadas nem alteradas: são cobranças
+      // reais no Mercado Pago e quem tem um QR antigo ainda pode pagá-lo
+      // (a sincronização existente recolhe o pagamento).
+      const sameRenewalRows = await db
+        .select()
+        .from(schema.payments)
+        .where(
+          and(
+            eq(schema.payments.ownerId, client.ownerId),
+            eq(schema.payments.clientId, client.id),
+            eq(schema.payments.amountCents, amountCents),
+            eq(schema.payments.days, plan.days),
+            eq(schema.payments.mode, effectiveMode),
+          ),
+        )
+        .orderBy(desc(schema.payments.id));
+      const awaitingPanel = sameRenewalRows.find(
+        (r) => r.status === "aprovado_pendente_painel",
+      );
+      if (awaitingPanel) {
+        return toPixPaymentResponse(
+          awaitingPanel,
+          "Este pagamento já foi aprovado no Mercado Pago e está aguardando a extensão no painel. Nenhuma cobrança nova foi criada — a nova tentativa acontece pela consulta deste pagamento, sem gerar outro Pix.",
+        );
+      }
+      const reusablePending = sameRenewalRows.find(
+        (r) => r.status === "pendente" && r.mpPaymentId && r.pixCode,
+      );
+      if (reusablePending) {
+        return toPixPaymentResponse(
+          reusablePending,
+          "Já existia um Pix pendente para esta renovação — o mesmo código/QR Code foi exibido novamente, sem criar outra cobrança.",
+        );
+      }
+
       let status: "pendente" | "aguardando_configuracao" | "falhou" = "pendente";
       let mpPaymentId: string | null = null;
       let pixCode: string | null = null;
@@ -4653,25 +4764,7 @@ export const Actions = {
       const row = inserted[0];
       if (!row) throw new Error("createPix: insert returned no rows");
       ctx.invalidateQueries();
-      return {
-        id: row.id,
-        clientId: row.clientId,
-        clientName: row.clientName,
-        amountCents: row.amountCents,
-        days: row.days,
-        credits: row.credits,
-        mode: row.mode,
-        status: row.status,
-        mpPaymentId: row.mpPaymentId ?? null,
-        pixCode: row.pixCode ?? null,
-        qrDataUrl: await pixQrDataUrl(row.pixCode ?? null),
-        couponCode: row.couponCode ?? null,
-        discountCents: row.discountCents ?? 0,
-        detail: row.detail,
-        wouldExpireAt: row.wouldExpireAt ? row.wouldExpireAt.toISOString() : null,
-        appliedRenewalId: row.appliedRenewalId ?? null,
-        createdAt: row.createdAt.toISOString(),
-      };
+      return toPixPaymentResponse(row, row.detail);
     },
   }),
 
