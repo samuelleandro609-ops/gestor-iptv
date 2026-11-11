@@ -380,3 +380,49 @@ tr:hover td {
   .gf-dashboard-heading { padding: 17px; }
   .gf-stat-card { min-height: 120px; padding: 14px; }
 }
+
+
+/* Sidebar: status em linha única e navegação com mais área útil */
+.gf-sidebar {
+  width: 288px;
+}
+.gf-sidebar-head {
+  flex: 0 0 auto;
+  padding-bottom: 12px;
+}
+.gf-sidebar-head ul {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.gf-sidebar-head li {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
+}
+.gf-sidebar-nav {
+  min-height: 0;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+.gf-sidebar-nav > button {
+  min-height: 44px;
+  padding-top: 11px;
+  padding-bottom: 11px;
+  line-height: 1.2;
+}
+.gf-sidebar-footer {
+  background: linear-gradient(180deg, rgba(7,20,38,.78), rgba(6,17,32,.98));
+}
+.gf-sidebar-footer > p:nth-of-type(2) {
+  overflow-wrap: anywhere;
+}
+@media (max-height: 820px) and (min-width: 1024px) {
+  .gf-sidebar-head { padding-top: 12px; padding-bottom: 8px; }
+  .gf-sidebar-head img { height: 54px; }
+  .gf-sidebar-head ul { margin-top: 8px; gap: 2px; }
+  .gf-sidebar-nav > button { min-height: 40px; padding-top: 9px; padding-bottom: 9px; }
+  .gf-sidebar-footer { padding-top: 9px; padding-bottom: 9px; }
+  .gf-sidebar-footer > p.hidden { margin-top: 7px; }
+}
