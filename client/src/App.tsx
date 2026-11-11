@@ -1380,7 +1380,7 @@ function Manager({
         </button>
         <img src={gestorFlexLogo} alt="Gestor Flex" className="h-9 w-auto shrink-0 object-contain" />
       </header>
-      <aside className="hidden border-b border-[var(--border)] bg-[var(--surface)] lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-72 lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
+      <aside className="gf-sidebar hidden border-b border-[var(--border)] bg-[var(--surface)] lg:sticky lg:top-0 lg:flex lg:h-screen lg:w-[272px] lg:shrink-0 lg:flex-col lg:border-b-0 lg:border-r">
         <SidebarContent
           data={data}
           tab={tab}
@@ -1437,7 +1437,7 @@ function Manager({
         </div>
       </div>
 
-      <main className="mx-auto w-full min-w-0 max-w-[1440px] flex-1 px-4 pb-12 lg:px-8">
+      <main className="gf-main mx-auto w-full min-w-0 max-w-[1600px] flex-1 px-4 pb-12 sm:px-6 lg:px-9 xl:px-10">
         {tab === "dashboard" && (
           <DashboardTab data={data} onNavigate={setTab} onShowClients={showClients} />
         )}
