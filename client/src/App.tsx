@@ -5645,10 +5645,11 @@ function DashboardTab({
   ];
 
   return (
-    <section aria-label="Dashboard" className="mt-5 space-y-5 lg:mt-8">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <section aria-label="Dashboard" className="gf-dashboard mt-5 space-y-6 lg:mt-8">
+      <div className="gf-dashboard-heading flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[var(--border)] bg-[linear-gradient(115deg,rgba(15,37,71,.82),rgba(7,20,38,.92))] px-5 py-5 sm:px-6">
         <div>
-          <h2 className="font-display text-2xl font-extrabold">Dashboard</h2>
+          <p className="mb-1 text-xs font-bold uppercase tracking-[.18em] text-[var(--accent-bright)]">Visão geral</p>
+          <h2 className="font-display text-2xl font-extrabold sm:text-3xl">Dashboard</h2>
           <p className="mt-0.5 text-sm text-[var(--dim)]">Visão geral do sistema, calculada dos seus clientes, planos e pagamentos cadastrados.</p>
         </div>
         <button
@@ -5688,8 +5689,8 @@ function DashboardTab({
         ) : null;
       })()}
 
-      <div className="relative">
-        <label htmlFor="dash-search" className={labelCls}>Buscar cliente</label>
+      <div className="gf-search relative rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5">
+        <label htmlFor="dash-search" className="mb-2 block text-xs font-bold uppercase tracking-wider text-[var(--dim)]">Buscar cliente</label>
         <input
           id="dash-search"
           className={inputCls}
@@ -5726,14 +5727,14 @@ function DashboardTab({
         )}
       </div>
 
-      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+      <div className="gf-stat-grid grid grid-cols-2 gap-3 xl:grid-cols-4">
         {cards.map((card) => (
           <button
             key={card.label}
             type="button"
             onClick={() => (card.label === "Servidores" ? onNavigate("servidores") : onShowClients(card.filter))}
             aria-label={`${card.label}: ${card.count}. Abrir a lista correspondente.`}
-            className="rounded-2xl border-2 p-4 text-left"
+            className="gf-stat-card group rounded-2xl border p-4 text-left sm:p-5"
             style={{ background: card.bg, borderColor: card.border }}
           >
             <span className="text-sm font-bold" style={{ color: card.color }}>
@@ -5750,20 +5751,26 @@ function DashboardTab({
         ))}
       </div>
 
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
-        <h3 className="font-display text-lg font-bold">$ Receita x Custo</h3>
+      <div className="gf-finance-panel rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-xs font-bold uppercase tracking-[.16em] text-[var(--accent-bright)]">Financeiro</p>
+            <h3 className="font-display text-lg font-bold">$ Receita x Custo</h3>
         <p className="mt-1 text-sm font-medium text-[var(--dim)]">
           Receita: pagamentos reais aprovados no Mercado Pago. Custo: despesas que você lança em Transações
           + custo dos créditos das renovações aplicadas (custo por crédito do servidor × créditos do plano,
           multiplicado pelas telas do cliente quando o servidor cobra por telas). Lucro = receita − custo.
-        </p>
+            </p>
+          </div>
+          <span className="rounded-full border border-[var(--border)] bg-[var(--surface2)] px-3 py-1 text-xs font-semibold text-[var(--dim)]">Resumo financeiro</span>
+        </div>
         <div className="mt-4 grid gap-3 sm:grid-cols-3">
           {periods.map((period) => {
             const receita = revenueInPeriod(data.payments, period.key);
             const custo = costInPeriod(data.expenses, period.key) + creditCostInPeriod(data, period.key);
             const lucro = receita - custo;
             return (
-              <div key={period.key} className="rounded-xl bg-[var(--surface2)] p-4">
+              <div key={period.key} className="gf-period-card rounded-xl border border-[var(--border)] bg-[var(--surface2)] p-4 sm:p-5">
                 <p className="font-display font-bold">$ {period.label}</p>
                 <dl className="mt-3 space-y-2 text-sm">
                   <div className="flex items-center justify-between">
@@ -5787,7 +5794,8 @@ function DashboardTab({
         </div>
       </div>
 
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4">
+      <div className="gf-due-panel rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-4 sm:p-5">
+        <p className="mb-1 text-xs font-bold uppercase tracking-[.16em] text-[var(--accent-bright)]">Acompanhamento</p>
         <h3 className="font-display text-lg font-bold">Vencimentos</h3>
         {!hasDue && (
           <p className="mt-2 text-sm text-[var(--dim)]">
