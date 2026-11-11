@@ -1192,15 +1192,15 @@ function SidebarContent({
 }) {
   return (
     <>
-      <div className={variant === "drawer" ? "px-5 pb-1 pt-6" : "hidden px-5 pb-1 pt-6 lg:block"}>
-        <img src={gestorFlexLogo} alt="Gestor Flex" className="h-20 w-auto object-contain" />
-        <p className="mt-2 text-sm text-[var(--dim)]">Visão geral do sistema</p>
-        <ul className="mt-4 space-y-1.5" aria-label="Status das integrações">
+      <div className={variant === "drawer" ? "gf-sidebar-head px-4 pb-2 pt-4" : "gf-sidebar-head hidden px-4 pb-2 pt-4 lg:block"}>
+        <img src={gestorFlexLogo} alt="Gestor Flex" className="h-16 w-auto object-contain" />
+        <p className="mt-1 text-xs text-[var(--dim)]">Visão geral do sistema</p>
+        <ul className="mt-3 space-y-1.5" aria-label="Status das integrações">
           {statusDots.map((s) => (
-            <li key={s.label} className="flex items-center gap-2 text-sm">
-              <span className={`inline-block h-2.5 w-2.5 rounded-full ${s.ok ? "bg-[var(--accent)]" : "bg-[var(--warn)]"}`} />
-              <span className="text-[var(--dim)]">{s.label}:</span>
-              <strong>{s.ok ? "funcionando" : "pendente"}</strong>
+            <li key={s.label} className="flex min-w-0 flex-nowrap items-center gap-1.5 whitespace-nowrap text-[11px] leading-5">
+              <span className={`inline-block h-2 w-2 shrink-0 rounded-full ${s.ok ? "bg-emerald-400" : "bg-red-400"}`} />
+              <span className="shrink-0 text-[var(--dim)]">{s.label}:</span>
+              <strong className={s.ok ? "shrink-0 font-bold text-emerald-400" : "shrink-0 font-bold text-red-400"}>{s.ok ? "funcionando" : "pendente"}</strong>
             </li>
           ))}
         </ul>
@@ -1209,8 +1209,8 @@ function SidebarContent({
         aria-label="Áreas do gestor"
         className={
           variant === "drawer"
-            ? "mt-2 flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3"
-            : "flex flex-wrap gap-1 px-3 py-3 lg:mt-2 lg:flex-1 lg:flex-col lg:flex-nowrap lg:gap-0.5 lg:overflow-y-auto lg:px-3"
+            ? "gf-sidebar-nav mt-1 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pb-3"
+            : "gf-sidebar-nav flex min-h-0 flex-wrap gap-1 px-3 py-2 lg:mt-1 lg:flex-1 lg:flex-col lg:flex-nowrap lg:gap-1 lg:overflow-y-auto lg:px-3 lg:pb-3"
         }
       >
         {menu.map((t) => (
@@ -1221,8 +1221,8 @@ function SidebarContent({
             aria-current={tab === t.id ? "page" : undefined}
             className={
               tab === t.id
-                ? "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg bg-[var(--accent-soft)] px-3 py-2.5 font-semibold text-[var(--accent-bright)] lg:w-full"
-                : "flex shrink-0 items-center gap-2.5 whitespace-nowrap rounded-lg px-3 py-2.5 font-medium text-[var(--text)] hover:bg-[var(--surface2)] lg:w-full"
+                ? "flex min-h-[43px] shrink-0 items-center gap-3 whitespace-nowrap rounded-xl bg-[var(--accent-soft)] px-3 py-3 text-sm font-semibold text-[var(--accent-bright)] lg:w-full"
+                : "flex min-h-[43px] shrink-0 items-center gap-3 whitespace-nowrap rounded-xl px-3 py-3 text-sm font-medium text-[var(--text)] hover:bg-[var(--surface2)] lg:w-full"
             }
           >
             <MenuIcon tab={t.id} />
@@ -1237,7 +1237,7 @@ function SidebarContent({
           </button>
         ))}
       </nav>
-      <div className="border-t border-[var(--border)] px-5 py-4">
+      <div className="gf-sidebar-footer shrink-0 border-t border-[var(--border)] px-4 py-3">
         <p className="text-xs font-semibold uppercase tracking-wide text-[var(--dim)]">Sua conta</p>
         <p className="mt-0.5 break-all text-sm font-medium">{data.accountEmail}</p>
         {!data.isAdmin && data.access.trialEndsAt && !data.access.subExpiresAt && (
@@ -1262,7 +1262,7 @@ function SidebarContent({
         >
           Sair
         </button>
-        <p className="mt-3 hidden text-xs leading-relaxed text-[var(--dim)] lg:block">
+        <p className="mt-2 hidden text-[10px] leading-snug text-[var(--dim)] lg:block">
           Pagamento aprovado só vira renovação quando a extensão no painel é
           confirmada. Extensões pendentes aparecem em Transações.
         </p>
@@ -1356,9 +1356,9 @@ function Manager({
   }
 
   const statusDots: { label: string; ok: boolean }[] = [
-    { label: "Pix (Mercado Pago)", ok: data.mpVerified && data.mpEnvironment === "producao" && data.liveMode },
+    { label: "Pix Mercado Pago", ok: data.mpVerified && data.mpEnvironment === "producao" && data.liveMode },
     { label: "Painel IPTV", ok: data.panelExtendReady },
-    { label: "WhatsApp (QR Code)", ok: data.qrWhatsappStatus === "conectado" },
+    { label: "WhatsApp QR Code", ok: data.qrWhatsappStatus === "conectado" },
   ];
 
   return (
